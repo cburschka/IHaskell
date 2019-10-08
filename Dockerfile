@@ -1,4 +1,4 @@
-FROM fpco/stack-build:lts-13.12
+FROM fpco/stack-build:lts-14.7
 
 # Install all necessary Ubuntu packages
 RUN apt-get update && apt-get install -y python3-pip libgmp-dev libmagic-dev libtinfo-dev libzmq3-dev libcairo2-dev libpango1.0-dev libblas-dev liblapack-dev gcc g++ && \
@@ -28,7 +28,6 @@ USER ${NB_UID}
 # Set up stack
 COPY stack.yaml stack.yaml
 RUN stack config set system-ghc --global true
-RUN stack setup
 
 # Install dependencies for IHaskell
 COPY ihaskell.cabal ihaskell.cabal

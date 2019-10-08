@@ -75,7 +75,11 @@ data PragmaType = PragmaLanguage
 parseString :: String -> Ghc [Located CodeBlock]
 parseString codeString = do
   -- Try to parse this as a single module.
-  flags <- getSessionDynFlags
+  flags' <- getSessionDynFlags
+  flags <- do
+    result <- liftIO $ parsePragmasIntoDynFlags flags' "<interactive>" codeString
+    return $ fromMaybe flags' result
+  _ <- setSessionDynFlags flags
   let output = runParser flags parserModule codeString
   case output of
     Parsed mdl

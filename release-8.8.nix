@@ -1,5 +1,11 @@
-{ compiler
-, nixpkgs ? import <nixpkgs> {}
+let
+  nixpkgs-src = builtins.fetchTarball {
+    url = "https://github.com/NixOS/nixpkgs/tarball/4f31c024d1e40b8e19badc832c8a99ce19143a5b";
+    sha256 = "0gqkf7spy60y4bycy3f3fg99wv77q7mhkg8c1a4s3gw51nakwvq8";
+  };
+in
+{ compiler ? "ghc881"
+, nixpkgs ? import nixpkgs-src {}
 , packages ? (_: [])
 , pythonPackages ? (_: [])
 , rtsopts ? "-M3g -N2"
@@ -45,9 +51,7 @@ let
       });
       ghc-parser        = self.callCabal2nix "ghc-parser" ghc-parser-src {};
       ipython-kernel    = self.callCabal2nix "ipython-kernel" ipython-kernel-src {};
-      zeromq4-haskell   = self.callHackage "zeromq4-haskell" "0.8.0" {};
 
-      haskell-src-exts  = self.haskell-src-exts_1_21_0;
       inline-r          = nixpkgs.haskell.lib.dontCheck super.inline-r;
       static-canvas     = nixpkgs.haskell.lib.doJailbreak super.static-canvas;
       system-fileio     = nixpkgs.haskell.lib.doJailbreak super.system-fileio;
@@ -60,14 +64,14 @@ let
 
   ihaskellWrapperSh = nixpkgs.writeScriptBin "ihaskell-wrapper" ''
     #! ${nixpkgs.stdenv.shell}
-    export GHC_PACKAGE_PATH="$(echo ${ihaskellEnv}/lib/*/package.conf.d| ${nixpkgs.coreutils}/bin/tr ' ' ':'):$GHC_PACKAGE_PATH"
+    export GHC_PACKAGE_PATH="$(echo ${ihaskellEnv}/lib/*/package.conf.d| tr ' ' ':'):$GHC_PACKAGE_PATH"
     export PATH="${nixpkgs.stdenv.lib.makeBinPath ([ ihaskellEnv jupyterlab ] ++ systemPackages nixpkgs)}''${PATH:+:}$PATH"
     exec ${ihaskellEnv}/bin/ihaskell "$@"
   '';
 
   ihaskellJupyterCmdSh = cmd: extraArgs: nixpkgs.writeScriptBin "ihaskell-${cmd}" ''
     #! ${nixpkgs.stdenv.shell}
-    export GHC_PACKAGE_PATH="$(echo ${ihaskellEnv}/lib/*/package.conf.d| ${nixpkgs.coreutils}/bin/tr ' ' ':'):$GHC_PACKAGE_PATH"
+    export GHC_PACKAGE_PATH="$(echo ${ihaskellEnv}/lib/*/package.conf.d| tr ' ' ':'):$GHC_PACKAGE_PATH"
     export PATH="${nixpkgs.stdenv.lib.makeBinPath ([ ihaskellEnv jupyterlab ] ++ systemPackages nixpkgs)}''${PATH:+:}$PATH"
     ${ihaskellEnv}/bin/ihaskell install \
       -l $(${ihaskellEnv}/bin/ghc --print-libdir) \
@@ -92,7 +96,6 @@ nixpkgs.buildEnv {
   '';
 
   passthru = {
-    inherit haskellPackages;
     inherit ihaskellEnv;
     inherit jupyterlab;
     inherit ihaskellJupyterCmdSh;

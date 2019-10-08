@@ -34,7 +34,7 @@ eval string = do
 
   getTemporaryDirectory >>= setCurrentDirectory
   let state = defaultKernelState { getLintStatus = LintOff }
-  _ <- interpret GHC.Paths.libdir False $ const $
+  _ <- interpret GHC.Paths.libdir False False $ const $
         IHaskell.Eval.Evaluate.evaluate state string publish noWidgetHandling
   out <- readIORef outputAccum
   pagerout <- readIORef pagerAccum
@@ -169,3 +169,17 @@ testEval =
 #endif
       ":k Maybe" `becomes` ["Maybe :: * -> *"]
       ":in String" `pages` ["type String = [Char] \t-- Defined in \8216GHC.Base\8217"]
+
+    it "captures stderr" $ do
+      [hereLit|
+        import Debug.Trace
+        trace "test" 5
+      |] `becomes` ["test\n5"]
+
+    it "immediately applies language extensions" $ do
+      [hereLit|
+        {-# LANGUAGE RankNTypes #-}
+
+        identity :: forall a. a -> a
+        identity a = a
+      |] `becomes` []

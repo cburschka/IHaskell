@@ -24,13 +24,11 @@ import           Control.Concurrent (forkIO, threadDelay)
 import           Data.Foldable (foldMap)
 import           Prelude (head, tail, last, init)
 import           Data.List (nubBy)
+import qualified Data.Set as Set
 import           Data.Char as Char
 import           Data.Dynamic
 import qualified Data.Serialize as Serialize
 import           System.Directory
-#if !MIN_VERSION_base(4,8,0)
-import           System.Posix.IO (createPipe)
-#endif
 import           System.Posix.IO (fdToHandle)
 import           System.IO (hGetChar, hSetEncoding, utf8)
 import           System.Random (getStdGen, randomRs)
@@ -116,21 +114,26 @@ ihaskellGlobalImports =
   , "import qualified IHaskell.Eval.Widgets"
   ]
 
+hiddenPackageNames :: Set.Set String
+hiddenPackageNames = Set.fromList ["ghc-lib", "ghc-lib-parser"]
+
 -- | Interpreting function for testing.
 testInterpret :: Interpreter a -> IO a
-testInterpret v = interpret GHC.Paths.libdir False (const v)
+testInterpret v = interpret GHC.Paths.libdir False False (const v)
 
 -- | Evaluation function for testing.
 testEvaluate :: String -> IO ()
 testEvaluate str = void $ testInterpret $
   evaluate defaultKernelState str (\_ _ -> return ()) (\state _ -> return state)
 
--- | Run an interpreting action. This is effectively runGhc with initialization and importing. First
--- argument indicates whether `stdin` is handled specially, which cannot be done in a testing
--- environment. The argument passed to the action indicates whether Haskell support libraries are
--- available.
-interpret :: String -> Bool -> (Bool -> Interpreter a) -> IO a
-interpret libdir allowedStdin action = runGhc (Just libdir) $ do
+-- | Run an interpreting action. This is effectively runGhc with initialization
+-- and importing. The `allowedStdin` argument indicates whether `stdin` is
+-- handled specially, which cannot be done in a testing environment. The
+-- `needsSupportLibraries` argument indicates whether we want support libraries
+-- to be imported, which is not the case during testing. The argument passed to
+-- the action indicates whether the IHaskell library is available.
+interpret :: String -> Bool -> Bool -> (Bool -> Interpreter a) -> IO a
+interpret libdir allowedStdin needsSupportLibraries action = runGhc (Just libdir) $ do
   -- If we're in a sandbox, add the relevant package database
   sandboxPackages <- liftIO getSandboxPackageConf
   initGhci sandboxPackages
@@ -140,7 +143,7 @@ interpret libdir allowedStdin action = runGhc (Just libdir) $ do
       void $ setSessionDynFlags $ dflags { verbosity = verb }
     Nothing -> return ()
 
-  hasSupportLibraries <- initializeImports
+  hasSupportLibraries <- initializeImports needsSupportLibraries
 
   -- Close stdin so it can't be used. Otherwise it'll block the kernel forever.
   dir <- liftIO getIHaskellDir
@@ -172,9 +175,9 @@ getPackageConfigs dflags =
     Just pkgDb = pkgDatabase dflags
 
 -- | Initialize our GHC session with imports and a value for 'it'. Return whether the IHaskell
--- support libraries are available.
-initializeImports :: Interpreter Bool
-initializeImports = do
+-- library is available.
+initializeImports :: Bool -> Interpreter Bool
+initializeImports importSupportLibraries = do
   -- Load packages that start with ihaskell-*, aren't just IHaskell, and depend directly on the right
   -- version of the ihaskell library. Also verify that the packages we load are not broken.
   dflags <- getSessionDynFlags
@@ -182,7 +185,8 @@ initializeImports = do
   (dflgs, _) <- liftIO $ initPackages dflags
   let db = getPackageConfigs dflgs
       packageNames = map (packageIdString' dflgs) db
-
+      hiddenPackages = Set.intersection hiddenPackageNames (Set.fromList packageNames)
+      hiddenFlags = fmap HidePackage $ Set.toList hiddenPackages
       initStr = "ihaskell-"
 
 #if MIN_VERSION_ghc(8,2,0)
@@ -222,19 +226,18 @@ initializeImports = do
 
       displayImports = map toImportStmt displayPkgs
 
+  void $ setSessionDynFlags $ dflgs { packageFlags = hiddenFlags ++ packageFlags dflgs }
+
   -- Import implicit prelude.
   importDecl <- parseImportDecl "import Prelude"
   let implicitPrelude = importDecl { ideclImplicit = True }
+      displayImports' = if importSupportLibraries then displayImports else []
 
   -- Import modules.
   imports <- mapM parseImportDecl $ requiredGlobalImports ++ if hasIHaskellPackage
-                                                               then ihaskellGlobalImports ++ displayImports
+                                                               then ihaskellGlobalImports ++ displayImports'
                                                                else []
   setContext $ map IIDecl $ implicitPrelude : imports
-
-  -- Set -fcontext-stack to 100 (default in ghc-7.10). ghc-7.8 uses 20, which is too small.
-  let contextStackFlag = printf "-fcontext-stack=%d" (100 :: Int)
-  void $ setFlags [contextStackFlag]
 
   return hasIHaskellPackage
 
@@ -294,7 +297,7 @@ evaluate kernelState code output widgetHandler = do
                -- Only run things if there are no parse errors.
                [] -> do
                  when (getLintStatus kernelState /= LintOff) $ liftIO $ do
-                   lintSuggestions <- lint cmds
+                   lintSuggestions <- lint code cmds
                    unless (noResults lintSuggestions) $
                      output (FinalResult lintSuggestions [] []) Success
 
@@ -658,7 +661,7 @@ evalCommand publish (Directive ShellCmd cmd) state = wrapExecution state $
           return mempty
         else return $ displayError $ printf "No such directory: '%s'" directory
     cmd1 -> liftIO $ do
-      (pipe, hdl) <- createPipe'
+      (pipe, hdl) <- createPipe
       let initProcSpec = shell $ unwords cmd1
           procSpec = initProcSpec
             { std_in = Inherit
@@ -712,16 +715,6 @@ evalCommand publish (Directive ShellCmd cmd) state = wrapExecution state $
                                ]
 
       loop
-      where
-#if MIN_VERSION_base(4,8,0)
-        createPipe' = createPipe
-#else
-        createPipe' = do
-          (readEnd, writeEnd) <- createPipe
-          handle <- fdToHandle writeEnd
-          pipe <- fdToHandle readEnd
-          return (pipe, handle)
-#endif
 -- This is taken largely from GHCi's info section in InteractiveUI.
 evalCommand _ (Directive GetHelp _) state = do
   write state "Help via :help or :?."
@@ -1101,7 +1094,10 @@ capturedEval output stmt = do
       writeVariable = var "file_write_var_"
 
       -- Variable where to store old stdout.
-      oldVariable = var "old_var_"
+      oldVariableStdout = var "old_var_stdout_"
+
+      -- Variable where to store old stderr.
+      oldVariableStderr = var "old_var_stderr_"
 
       -- Variable used to store true `it` value.
       itVariable = var "it_var_"
@@ -1112,9 +1108,12 @@ capturedEval output stmt = do
       initStmts =
         [ printf "let %s = it" itVariable
         , printf "(%s, %s) <- IHaskellIO.createPipe" readVariable writeVariable
-        , printf "%s <- IHaskellIO.dup IHaskellIO.stdOutput" oldVariable
+        , printf "%s <- IHaskellIO.dup IHaskellIO.stdOutput" oldVariableStdout
+        , printf "%s <- IHaskellIO.dup IHaskellIO.stdError" oldVariableStderr
         , voidpf "IHaskellIO.dupTo %s IHaskellIO.stdOutput" writeVariable
+        , voidpf "IHaskellIO.dupTo %s IHaskellIO.stdError" writeVariable
         , voidpf "IHaskellSysIO.hSetBuffering IHaskellSysIO.stdout IHaskellSysIO.NoBuffering"
+        , voidpf "IHaskellSysIO.hSetBuffering IHaskellSysIO.stderr IHaskellSysIO.NoBuffering"
         , printf "let it = %s" itVariable
         ]
 
@@ -1122,7 +1121,9 @@ capturedEval output stmt = do
       postStmts =
         [ printf "let %s = it" itVariable
         , voidpf "IHaskellSysIO.hFlush IHaskellSysIO.stdout"
-        , voidpf "IHaskellIO.dupTo %s IHaskellIO.stdOutput" oldVariable
+        , voidpf "IHaskellSysIO.hFlush IHaskellSysIO.stderr"
+        , voidpf "IHaskellIO.dupTo %s IHaskellIO.stdOutput" oldVariableStdout
+        , voidpf "IHaskellIO.dupTo %s IHaskellIO.stdError" oldVariableStderr
         , voidpf "IHaskellIO.closeFd %s" writeVariable
         , printf "let it = %s" itVariable
         ]
@@ -1144,7 +1145,7 @@ capturedEval output stmt = do
   -- This works fine on GHC 8.0 and newer
   dyn <- dynCompileExpr readVariable
   pipe <- case fromDynamic dyn of
-            Nothing -> fail "Evaluate: Bad pipe"
+            Nothing -> error "Evaluate: Bad pipe"
             Just fd -> liftIO $ do
                 hdl <- fdToHandle fd
                 hSetEncoding hdl utf8
