@@ -1,4 +1,4 @@
-![jupyter](https://i.imgur.com/S16l2Hw.png) ![IHaskell](https://i.imgur.com/qhXXFbA.png) [![Build Status](https://travis-ci.org/gibiansky/IHaskell.svg?branch=master)](https://travis-ci.org/gibiansky/IHaskell) [![Binder](https://mybinder.org/badge.svg)](https://mybinder.org/v2/gh/gibiansky/IHaskell/master)
+![jupyter](https://i.imgur.com/S16l2Hw.png) ![IHaskell](https://i.imgur.com/qhXXFbA.png) [![Build Status](https://github.com/gibiansky/IHaskell/workflows/CI/badge.svg)](https://github.com/gibiansky/IHaskell/actions?query=workflow%3ACI) [![Binder](https://mybinder.org/badge.svg)](https://mybinder.org/v2/gh/gibiansky/IHaskell/master)
 
 # IHaskell
 
@@ -29,6 +29,9 @@ sudo apt-get install -y python3-pip git libtinfo-dev libzmq3-dev libcairo2-dev l
 Install `stack`, clone this repository, install Python requirements, install
 `ihaskell`, and install the Jupyter kernelspec with `ihaskell`.
 
+These instructions assume you don't already have Stack or a Jupyter
+installation, please skip the relevant steps if this is not the case.
+
 ```bash
 curl -sSL https://get.haskellstack.org/ | sh
 git clone https://github.com/gibiansky/IHaskell
@@ -39,11 +42,11 @@ stack install --fast
 ihaskell install --stack
 ```
 
-If you want to use jupyterlab (right now only version ~0.33), you need to
-install the jupyterlab ihaskell extension to get syntax highlighting with:
+If you want to use jupyterlab, you need to install the jupyterlab ihaskell
+extension to get syntax highlighting with:
 
 ```bash
-jupyter labextension install ihaskell_jupyterlab
+jupyter labextension install jupyterlab-ihaskell
 ```
 
 Run Jupyter.
@@ -60,6 +63,9 @@ If you do not have it yet run `/usr/bin/ruby -e "$(curl -fsSL https://raw.github
 
 You also need the Xcode command line tools.
 You can install them by running `xcode-select --install` in the terminal and following the prompts.
+
+These instructions assume you don't already have Stack or a Jupyter
+installation, please skip the relevant steps if this is not the case.
 
 ```bash
 brew install python3 zeromq libmagic cairo pkg-config haskell-stack pango
@@ -120,10 +126,39 @@ docker build -t ihaskell:latest .
 docker run --rm -it -p8888:8888 ihaskell:latest
 ```
 
+Or use the continously updated Docker image 
+[on Docker Hub](https://hub.docker.com/r/gibiansky/ihaskell).
+
+```sh
+docker run --rm -p 8888:8888 gibiansky/ihaskell
+```
+
+In order to mount your own local files into the Docker container
+use following command:
+
+```sh
+docker run --rm -p 8888:8888 -v "$PWD":/home/jovyan/work gibiansky/ihaskell
+```
+
+Be aware that the directory you're mounting must contain
+a `stack.yaml` file.
+A simple version would be:
+
+```yaml
+resolver: lts-14.27
+packages: []
+```
+
+It's recommended to use the same LTS version as the iHaskell image is using itself 
+(as can be seen in [its stack.yaml](./stack.yaml)).
+This guarantees that stack doesn't have to first perform 
+a lengthy installation of GHC before running your notebook.
+
+
 ## Stack and Docker
 
-IHaskell, being a Jupyter kernel, depends at runtime on a tall pile of software
-provided by, traditionally, `apt`, `pip`, and `npm`.
+IHaskell, being a Jupyter kernel, has a tall pile of compile-time and run-time
+dependencies provided by, traditionally, `apt`, `pip`, and `npm`.
 To develop IHaskell, we want to be able to isolate and control all of the
 dependencies. We can use
 [Stack's Docker integration](https://docs.haskellstack.org/en/stable/docker_integration/)
@@ -176,15 +211,15 @@ stack --docker exec pip3 -- install jupyterlab
 stack --docker exec bash -- -c 'cd ihaskell_labextension;npm install;npm run build;jupyter labextension link .'
 ```
 
-Run the Jupyter notebook, with security disabled for testing.
+Run the Jupyter notebook, with security disabled for testing, listening on all interfaces.
 
 ```bash
-stack --docker exec jupyter -- notebook --NotebookApp.token='' notebooks
+stack --docker exec jupyter -- notebook --NotebookApp.token='' --no-browser --LabApp.ip=0.0.0.0 notebooks
 ```
 
-Run JupyterLab (if you installed it), with security disabled for testing.
+Run JupyterLab (if you installed it), with security disabled for testing, listening on all interfaces.
 ```bash
-stack --docker exec jupyter -- lab --NotebookApp.token='' notebooks
+stack --docker exec jupyter -- lab --NotebookApp.token='' --no-browser --LabApp.ip=0.0.0.0 notebooks
 ```
 Everything in Stackage can be installed by `stack --docker install`.
 
@@ -210,20 +245,21 @@ If you have the `nix` package manager installed, you can create an IHaskell
 notebook environment with one command. For example:
 
 ```bash
-$ nix-build -I nixpkgs=https://github.com/NixOS/nixpkgs-channels/archive/nixos-19.03.tar.gz --argstr compiler ghc864 --arg packages "haskellPackages: [ haskellPackages.lens ]"
+$ nix-build -I nixpkgs=https://github.com/NixOS/nixpkgs-channels/archive/nixos-20.03.tar.gz release.nix --argstr compiler ghc865 --arg packages "haskellPackages: [ haskellPackages.lens ]"
 <result path>
 $ <result path>/bin/ihaskell-notebook
 ```
 
-It might take a while the first time, but subsequent builds will be much faster.
+It might take a while the first time, but subsequent builds will be much
+faster. You can use the
+[https://ihaskell.cachix.org](https://app.cachix.org/cache/ihaskell) cache for
+prebuilt artifacts.
 
 The IHaskell display modules are not loaded by default and have to be specified as additional packages:
 
 ```bash
-$ NIXPKGS_ALLOW_BROKEN=1 nix-build -I nixpkgs=https://github.com/NixOS/nixpkgs-channels/archive/nixos-19.03.tar.gz --argstr compiler ghc844 --arg packages "haskellPackages: [ haskellPackages.ihaskell-blaze haskellPackages.ihaskell-charts ]"
+$ nix-build -I nixpkgs=https://github.com/NixOS/nixpkgs-channels/archive/nixos-20.03.tar.gz release.nix --argstr compiler ghc865 --arg packages "haskellPackages: [ haskellPackages.ihaskell-blaze haskellPackages.ihaskell-charts ]"
 ```
-
-We use GHC 8.4 here because not all dependencies have been updated to support GHC 8.6 yet.
 
 For more examples of using IHaskell with Nix, see https://github.com/vaibhavsagar/notebooks.
 

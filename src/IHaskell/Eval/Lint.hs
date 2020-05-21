@@ -8,10 +8,16 @@ import           IHaskellPrelude
 import           Data.Maybe (mapMaybe)
 import           System.IO.Unsafe (unsafePerformIO)
 
+#if MIN_VERSION_hlint(3,1,1)
+import           Language.Haskell.HLint
+#elif MIN_VERSION_hlint(3,0,0)
+import           Language.Haskell.HLint
+import           SrcLoc (SrcSpan(..), srcSpanStartLine)
+#else
 import           Language.Haskell.Exts hiding (Module)
-
 import           Language.Haskell.HLint as HLint
 import           Language.Haskell.HLint3
+#endif
 
 import           IHaskell.Types
 import           IHaskell.Display
@@ -191,12 +197,26 @@ showIdea idea =
     Just wn ->
       Just
         Suggest
-          { line = srcSpanStartLine $ ideaSpan idea
+          { line = getSrcSpanStartLine $ ideaSpan idea
           , found = showSuggestion $ ideaFrom idea
           , whyNot = showSuggestion wn
           , severity = ideaSeverity idea
           , suggestion = ideaHint idea
           }
+  where
+    getSrcSpanStartLine span =
+#if MIN_VERSION_hlint(3,1,1)
+      case unpackSrcSpan span of
+        Just (_, (startLine, _), _) -> startLine
+        Nothing -> 1
+#elif MIN_VERSION_hlint(3,0,0)
+      case span of
+        RealSrcSpan realSpan -> srcSpanStartLine realSpan
+        UnhelpfulSpan _ -> 1
+#else
+      srcSpanStartLine span
+#endif
+
 
 
 plainSuggestion :: LintSuggestion -> String
@@ -212,12 +232,13 @@ htmlSuggestions = concatMap toHtml
                        [ named $ suggestion suggest
                        , floating "left" $ styl severityClass "Found:" ++
                                            -- Things that look like this get highlighted.
-                                           styleId "highlight-code" "haskell" (found suggest)
+                                           styleId "highlight-code" "haskell" (escapeDollar $ found suggest)
                        , floating "left" $ styl severityClass "Why Not:" ++
                                            -- Things that look like this get highlighted.
-                                           styleId "highlight-code" "haskell" (whyNot suggest)
+                                           styleId "highlight-code" "haskell" (escapeDollar $ whyNot suggest)
                        ]
       where
+        escapeDollar = replace "$" "\\$"
         severityClass =
           case severity suggest of
             Error -> "error"

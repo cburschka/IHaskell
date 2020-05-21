@@ -1,13 +1,17 @@
-FROM fpco/stack-build:lts-14.7
+FROM ubuntu:18.04
+
+ARG STACK_VERSION=2.3.1
+ARG RESOLVER=lts-14.27
 
 # Install all necessary Ubuntu packages
-RUN apt-get update && apt-get install -y python3-pip libgmp-dev libmagic-dev libtinfo-dev libzmq3-dev libcairo2-dev libpango1.0-dev libblas-dev liblapack-dev gcc g++ && \
+RUN apt-get update && apt-get install -y python3-pip libgmp-dev libmagic-dev libtinfo-dev libzmq3-dev libcairo2-dev libpango1.0-dev libblas-dev liblapack-dev gcc g++ wget && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Jupyter notebook
 RUN pip3 install -U jupyter
 
-ENV LANG en_US.UTF-8
+ENV LANG C.UTF-8
+ENV LC_ALL C.UTF-8
 ENV NB_USER jovyan
 ENV NB_UID 1000
 ENV HOME /home/${NB_USER}
@@ -17,42 +21,34 @@ RUN adduser --disabled-password \
     --uid ${NB_UID} \
     ${NB_USER}
 
+RUN wget -qO- https://github.com/commercialhaskell/stack/releases/download/v$STACK_VERSION/stack-$STACK_VERSION-linux-x86_64.tar.gz | tar xz --wildcards --strip-components=1 -C /usr/bin '*/stack'
+
 # Set up a working directory for IHaskell
-RUN mkdir ${HOME}/ihaskell
+RUN install -d -o ${NB_UID} -g ${NB_UID} ${HOME} ${HOME}/ihaskell
 WORKDIR ${HOME}/ihaskell
 
-USER root
-RUN chown -R ${NB_UID} ${HOME}
 USER ${NB_UID}
-
-# Set up stack
-COPY stack.yaml stack.yaml
-RUN stack config set system-ghc --global true
 
 # Install dependencies for IHaskell
-COPY ihaskell.cabal ihaskell.cabal
-COPY ipython-kernel ipython-kernel
-COPY ghc-parser ghc-parser
-COPY ihaskell-display ihaskell-display
+COPY --chown=${NB_UID}:${NB_UID} stack.yaml stack.yaml
+COPY --chown=${NB_UID}:${NB_UID} ihaskell.cabal ihaskell.cabal
+COPY --chown=${NB_UID}:${NB_UID} ipython-kernel ipython-kernel
+COPY --chown=${NB_UID}:${NB_UID} ghc-parser ghc-parser
+COPY --chown=${NB_UID}:${NB_UID} ihaskell-display ihaskell-display
 
-USER root
-RUN chown -R ${NB_UID} ${HOME}
-USER ${NB_UID}
-
+RUN stack setup
 RUN stack build --only-snapshot
 
 # Install IHaskell itself. Don't just COPY . so that
 # changes in e.g. README.md don't trigger rebuild.
-COPY src ${HOME}/ihaskell/src
-COPY html ${HOME}/ihaskell/html
-COPY main ${HOME}/ihaskell/main
-COPY LICENSE ${HOME}/ihaskell/LICENSE
-
-USER root
-RUN chown -R ${NB_UID} ${HOME}
-USER ${NB_UID}
+COPY --chown=${NB_UID}:${NB_UID} src ${HOME}/ihaskell/src
+COPY --chown=${NB_UID}:${NB_UID} html ${HOME}/ihaskell/html
+COPY --chown=${NB_UID}:${NB_UID} main ${HOME}/ihaskell/main
+COPY --chown=${NB_UID}:${NB_UID} LICENSE ${HOME}/ihaskell/LICENSE
 
 RUN stack build && stack install
+RUN mkdir -p ${HOME}/.stack/global-project && \
+    echo "packages: []\nresolver: ${RESOLVER}\n" > ${HOME}/.stack/global-project/stack.yaml
 
 # Run the notebook
 ENV PATH $(stack path --local-install-root)/bin:$(stack path --snapshot-install-root)/bin:$(stack path --compiler-bin):/home/${NB_USER}/.local/bin:${PATH}

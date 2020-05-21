@@ -28,6 +28,7 @@ import qualified Data.Set as Set
 import           Data.Char as Char
 import           Data.Dynamic
 import qualified Data.Serialize as Serialize
+import qualified Debugger
 import           System.Directory
 import           System.Posix.IO (fdToHandle)
 import           System.IO (hGetChar, hSetEncoding, utf8)
@@ -735,11 +736,12 @@ evalCommand _ (Directive GetHelp _) state = do
                     , "    :type <expression>        -  Print expression type."
                     , "    :info <name>              -  Print all info for a name."
                     , "    :hoogle <query>           -  Search for a query on Hoogle."
-                    , "    :doc <ident>              -  Get documentation for an identifier via Hogole."
+                    , "    :doc <ident>              -  Get documentation for an identifier via Hoogle."
                     , "    :set -XFlag -Wall         -  Set an option (like ghci)."
                     , "    :option <opt>             -  Set an option."
                     , "    :option no-<opt>          -  Unset an option."
                     , "    :?, :help                 -  Show this help text."
+                    , "    :sprint <value>           -  Print a value without forcing evaluation."
                     , ""
                     , "Any prefix of the commands will also suffice, e.g. use :ty for :type."
                     , ""
@@ -784,6 +786,17 @@ evalCommand _ (Directive SearchHoogle query) state = safely state $ do
 evalCommand _ (Directive GetDoc query) state = safely state $ do
   results <- liftIO $ Hoogle.document query
   return $ hoogleResults state results
+
+evalCommand _ (Directive SPrint binding) state = wrapExecution state $ do
+  flags <- getSessionDynFlags
+  contents <- liftIO $ newIORef []
+  let action = \_dflags _sev _srcspan _ppr _style msg -> modifyIORef' contents (showSDoc flags msg :)
+  let flags' = flags { log_action = action }
+  _ <- setSessionDynFlags flags'
+  Debugger.pprintClosureCommand False False binding
+  _ <- setSessionDynFlags flags
+  sprint <- liftIO $ readIORef contents
+  return $ formatType (unlines sprint)
 
 evalCommand output (Statement stmt) state = wrapExecution state $ evalStatementOrIO output state
                                                                     (CapturedStmt stmt)
@@ -1072,7 +1085,11 @@ doLoadModule name modName = do
       return $ displayError $ "Failed to load module " ++ modName ++ ": " ++ show exception
 
 objTarget :: DynFlags -> HscTarget
+#if MIN_VERSION_ghc(8,10,0)
+objTarget = defaultObjectTarget
+#else
 objTarget flags = defaultObjectTarget $ targetPlatform flags
+#endif
 
 data Captured a = CapturedStmt String
                 | CapturedIO (IO a)
