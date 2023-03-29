@@ -4,6 +4,7 @@
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE CPP #-}
 
 -- | Description : All message type definitions.
 module IHaskell.Types (
@@ -11,8 +12,10 @@ module IHaskell.Types (
     MessageHeader(..),
     MessageType(..),
     dupHeader,
+    setVersion,
     Username,
     Metadata,
+    BufferPath,
     replyType,
     ExecutionState(..),
     StreamType(..),
@@ -41,12 +44,19 @@ module IHaskell.Types (
 
 import           IHaskellPrelude
 
-import           Data.Aeson (ToJSON (..), Value, (.=), object)
+import           Data.Aeson (ToJSON (..), Value, (.=), object, Value(String))
 import           Data.Function (on)
-import           Data.Serialize
+import           Data.Text (pack)
+import           Data.Binary
 import           GHC.Generics
 
 import           IHaskell.IPython.Kernel
+
+#if MIN_VERSION_aeson(2,0,0)
+import qualified Data.Aeson.KeyMap as KeyMap
+#else
+import qualified Data.HashMap.Strict as HashMap
+#endif
 
 -- | A class for displayable Haskell types.
 --
@@ -58,6 +68,11 @@ import           IHaskell.IPython.Kernel
 class IHaskellDisplay a where
   display :: a -> IO Display
 
+type BufferPath = [Text]
+
+emptyBPs :: [BufferPath]
+emptyBPs = []
+
 -- | Display as an interactive widget.
 class IHaskellDisplay a => IHaskellWidget a where
   -- | Target name for this widget. The actual input parameter should be ignored. By default evaluate
@@ -68,6 +83,10 @@ class IHaskellDisplay a => IHaskellWidget a where
   -- | Target module for this widget. Evaluates to an empty string by default.
   targetModule :: a -> String
   targetModule _ = ""
+
+  -- | Buffer paths for this widget. Evaluates to an empty array by default.
+  getBufferPaths :: a -> [BufferPath]
+  getBufferPaths _ = emptyBPs
 
   -- | Get the uuid for comm associated with this widget. The widget is responsible for storing the
   -- UUID during initialization.
@@ -124,6 +143,7 @@ instance IHaskellDisplay Widget where
 instance IHaskellWidget Widget where
   targetName (Widget widget) = targetName widget
   targetModule (Widget widget) = targetModule widget
+  getBufferPaths (Widget widget) = getBufferPaths widget
   getCommUUID (Widget widget) = getCommUUID widget
   open (Widget widget) = open widget
   comm (Widget widget) = comm widget
@@ -141,7 +161,11 @@ data Display = Display [DisplayData]
              | ManyDisplay [Display]
   deriving (Show, Typeable, Generic)
 
-instance Serialize Display
+instance ToJSON Display where
+  toJSON (Display d) = object (map displayDataToJson d)
+  toJSON (ManyDisplay d) = toJSON d
+
+instance Binary Display
 
 instance Semigroup Display where
   ManyDisplay a <> ManyDisplay b = ManyDisplay (a ++ b)
@@ -236,17 +260,17 @@ data WidgetMsg = Open Widget Value
                 DispMsg Widget Display
                |
                -- ^ A 'display_data' message, sent as a [method .= custom] comm_msg
-                ClrOutput Widget Bool
-  -- ^ A 'clear_output' message, sent as a [method .= custom] comm_msg
+                ClrOutput Bool
+  -- ^ A 'clear_output' message, sent as a clear_output message
   deriving (Show, Typeable)
 
-data WidgetMethod = UpdateState Value
+data WidgetMethod = UpdateState Value [BufferPath]
                   | CustomContent Value
                   | DisplayWidget
 
 instance ToJSON WidgetMethod where
   toJSON DisplayWidget = object ["method" .= ("display" :: Text)]
-  toJSON (UpdateState v) = object ["method" .= ("update" :: Text), "state" .= v]
+  toJSON (UpdateState v bp) = object ["method" .= ("update" :: Text), "state" .= v, "buffer_paths" .= bp]
   toJSON (CustomContent v) = object ["method" .= ("custom" :: Text), "content" .= v]
 
 -- | Output of evaluation.
@@ -276,6 +300,20 @@ dupHeader :: MessageHeader -> MessageType -> IO MessageHeader
 dupHeader hdr messageType = do
   uuid <- liftIO random
   return hdr { mhMessageId = uuid, mhMsgType = messageType }
+
+-- | Modifies a header and appends the version of the Widget Messaging Protocol as metadata
+setVersion :: MessageHeader  -- ^ The header to modify
+           -> String         -- ^ The version to set
+           -> MessageHeader  -- ^ The modified header
+
+-- We use the 'fromList' function from "Data.HashMap.Strict" (or
+-- "Data.Aeson.KeyMap") instead of the 'object' function from "Data.Aeson"
+-- because 'object' returns a 'Value', but metadata needs an 'Object'.
+#if MIN_VERSION_aeson(2,0,0)
+setVersion hdr v = hdr { mhMetadata = Metadata (KeyMap.fromList [("version", String $ pack v)]) }
+#else
+setVersion hdr v = hdr { mhMetadata = Metadata (HashMap.fromList [("version", String $ pack v)]) }
+#endif
 
 -- | Whether or not an error occurred.
 data ErrorOccurred = Success

@@ -1,12 +1,12 @@
-![jupyter](https://i.imgur.com/S16l2Hw.png) ![IHaskell](https://i.imgur.com/qhXXFbA.png) [![Build Status](https://github.com/gibiansky/IHaskell/workflows/CI/badge.svg)](https://github.com/gibiansky/IHaskell/actions?query=workflow%3ACI) [![Binder](https://mybinder.org/badge.svg)](https://mybinder.org/v2/gh/gibiansky/IHaskell/master)
+![jupyter](https://i.imgur.com/S16l2Hw.png) ![IHaskell](https://i.imgur.com/qhXXFbA.png) [![Build Status](https://github.com/gibiansky/IHaskell/workflows/CI/badge.svg)](https://github.com/gibiansky/IHaskell/actions?query=workflow%3ACI) [![Binder](https://mybinder.org/badge.svg)](https://mybinder.org/v2/gh/gibiansky/IHaskell/mybinder)
 
 # IHaskell
 
-> You can now try IHaskell directly in your browser at [CoCalc](https://cocalc.com) or [mybinder.org](https://mybinder.org/v2/gh/gibiansky/IHaskell/master).
+> You can now try IHaskell directly in your browser at [CoCalc](https://cocalc.com) or [mybinder.org](https://mybinder.org/v2/gh/gibiansky/IHaskell/mybinder).
 >
 > Alternatively, watch a [talk and demo](http://begriffs.com/posts/2016-01-20-ihaskell-notebook.html) showing off IHaskell features.
 
-IHaskell is a kernel for the [Jupyter project](https://jupyter.org), which allows you to use Haskell inside Jupyter frontends (including the console and notebook). It currently supports GHC 8, 8.2, 8.4, and 8.6. For GHC 7.10 support please use the [`GHC7`](https://github.com/gibiansky/IHaskell/releases/tag/GHC7) tag.
+IHaskell is a kernel for the [Jupyter project](https://jupyter.org), which allows you to use Haskell inside Jupyter frontends (including the console and notebook). It currently supports GHC 8.0 through 9.0. For GHC 7.10 support please use the [`GHC7`](https://github.com/gibiansky/IHaskell/releases/tag/GHC7) tag.
 
 For a tour of some IHaskell features, check out the [demo Notebook](http://nbviewer.ipython.org/github/gibiansky/IHaskell/blob/master/notebooks/IHaskell.ipynb). More example notebooks are available on the [wiki](https://github.com/gibiansky/IHaskell/wiki).
 The [wiki](https://github.com/gibiansky/IHaskell/wiki) also has more extensive documentation of IHaskell features.
@@ -37,16 +37,8 @@ curl -sSL https://get.haskellstack.org/ | sh
 git clone https://github.com/gibiansky/IHaskell
 cd IHaskell
 pip3 install -r requirements.txt
-# stack install gtk2hs-buildtools # Disabled for now because gtk2hs-buildtools doesn't work with lts-13 yet
 stack install --fast
 ihaskell install --stack
-```
-
-If you want to use jupyterlab, you need to install the jupyterlab ihaskell
-extension to get syntax highlighting with:
-
-```bash
-jupyter labextension install jupyterlab-ihaskell
 ```
 
 Run Jupyter.
@@ -54,7 +46,6 @@ Run Jupyter.
 ```bash
 stack exec jupyter -- notebook
 ```
-
 
 ## Mac
 
@@ -72,12 +63,11 @@ brew install python3 zeromq libmagic cairo pkg-config haskell-stack pango
 git clone https://github.com/gibiansky/IHaskell
 cd IHaskell
 pip3 install -r requirements.txt
-# stack install gtk2hs-buildtools # Disabled for now because gtk2hs-buildtools doesn't work with lts-13 yet
 stack install --fast
 ihaskell install --stack
 ```
 
-If you have Homebrew installed to a custom location, you'd need to specify `--extra-include-dirs ${HOMEBREW_PREFIX}/include --extra-lib-dir ${HOMEBREW_PREFIX}/lib` to the `stack` command.
+If you have Homebrew installed to a location that `stack` does not expect (e.g. `/opt/homebrew`), you'd need to specify `--extra-include-dirs ${HOMEBREW_PREFIX}/include --extra-lib-dirs ${HOMEBREW_PREFIX}/lib` to the `stack` command.
 
 Run Jupyter.
 
@@ -123,10 +113,10 @@ in the top directory.
 
 ```bash
 docker build -t ihaskell:latest .
-docker run --rm -it -p8888:8888 ihaskell:latest
+docker run --rm -p 8888:8888 ihaskell:latest
 ```
 
-Or use the continously updated Docker image 
+Or use the continuously updated Docker image 
 [on Docker Hub](https://hub.docker.com/r/gibiansky/ihaskell).
 
 ```sh
@@ -137,7 +127,7 @@ In order to mount your own local files into the Docker container
 use following command:
 
 ```sh
-docker run --rm -p 8888:8888 -v "$PWD":/home/jovyan/work gibiansky/ihaskell
+docker run --rm -p 8888:8888 -v "$PWD":/home/jovyan/src gibiansky/ihaskell
 ```
 
 Be aware that the directory you're mounting must contain
@@ -145,99 +135,16 @@ a `stack.yaml` file.
 A simple version would be:
 
 ```yaml
-resolver: lts-14.27
+resolver: lts-16.23
 packages: []
 ```
 
-It's recommended to use the same LTS version as the iHaskell image is using itself 
+It's recommended to use the same LTS version as the IHaskell image is using itself 
 (as can be seen in [its stack.yaml](./stack.yaml)).
 This guarantees that stack doesn't have to first perform 
 a lengthy installation of GHC before running your notebook.
 
-
-## Stack and Docker
-
-IHaskell, being a Jupyter kernel, has a tall pile of compile-time and run-time
-dependencies provided by, traditionally, `apt`, `pip`, and `npm`.
-To develop IHaskell, we want to be able to isolate and control all of the
-dependencies. We can use
-[Stack's Docker integration](https://docs.haskellstack.org/en/stable/docker_integration/)
-to install all of those runtime dependencies into an isolated environment.
-
-* The system library dependencies installed with `apt` will be isolated
-  in the `ihaskell-dev` Docker image.
-* Dependencies installed by `pip` and `npm` will be isolated in
-  the `IHaskell/.stack-work` subdirectory.
-* All Stack build products and installed binaries will be isolated in the
-  `IHaskell/.stack-work` subdirectory.
-
-The following `stack --docker` commands require a Docker image
-named `ihaskell-dev`, so build that image from the `docker/Dockerfile` with this
-command:
-
-```bash
-docker build -t ihaskell-dev docker
-```
-
-Install the `ghc` version specified by the Stack `resolver`.
-
-```bash
-stack --docker setup
-```
-
-Install Jupyter and all of its requirements.
-```bash
-stack --docker exec pip3 -- install jupyter
-```
-
-Build IHaskell and all of its packages.
-
-```bash
-stack --docker install
-```
-
-Direct IHaskell to register itself as a Jupyter kernel.
-
-```bash
-stack --docker exec ihaskell -- install --stack
-```
-
-Optionally, install JupyterLab and the IHaskell JupyterLab extension for
-syntax highlighting. See the
-[`ihaskell_labextension/README.md`](ihaskell_labextension/README.md).
-
-```bash
-stack --docker exec pip3 -- install jupyterlab
-stack --docker exec bash -- -c 'cd ihaskell_labextension;npm install;npm run build;jupyter labextension link .'
-```
-
-Run the Jupyter notebook, with security disabled for testing, listening on all interfaces.
-
-```bash
-stack --docker exec jupyter -- notebook --NotebookApp.token='' --no-browser --LabApp.ip=0.0.0.0 notebooks
-```
-
-Run JupyterLab (if you installed it), with security disabled for testing, listening on all interfaces.
-```bash
-stack --docker exec jupyter -- lab --NotebookApp.token='' --no-browser --LabApp.ip=0.0.0.0 notebooks
-```
-Everything in Stackage can be installed by `stack --docker install`.
-
-To install a local package, add it to the `stack.yaml`
-file  (See: "Where are my packages?" below).
-Install the package with `stack`, then restart `jupyter`.
-
-```bash
-# after adding details about mypackage to stack.yaml
-stack --docker install mypackage
-```
-
-To cleanly delete the entire Stack Docker development environment:
-
-```bash
-docker image rm ihaskell-dev
-stack clean --full
-```
+You can also use the following script to run IHaskell in Docker: https://gist.github.com/brandonchinn178/928d6137bfd17961b9584a8f96c18827
 
 ## Nix
 
@@ -247,7 +154,7 @@ notebook environment with one command. For example:
 ```bash
 $ nix-build -I nixpkgs=https://github.com/NixOS/nixpkgs-channels/archive/nixos-20.03.tar.gz release.nix --argstr compiler ghc865 --arg packages "haskellPackages: [ haskellPackages.lens ]"
 <result path>
-$ <result path>/bin/ihaskell-notebook
+$ <result path>/bin/jupyter notebook
 ```
 
 It might take a while the first time, but subsequent builds will be much
@@ -263,14 +170,32 @@ $ nix-build -I nixpkgs=https://github.com/NixOS/nixpkgs-channels/archive/nixos-2
 
 For more examples of using IHaskell with Nix, see https://github.com/vaibhavsagar/notebooks.
 
+# Developing
+
+IHaskell is regularly updated to work with the latest version of GHC. To read how this is done, and how the development environment is set up, please see [this blog post](https://vaibhavsagar.com/blog/2021/05/02/updating-ihaskell-newer-ghc).
+
+## Nix flake
+
+There is also a Nix flake that provides a developer environment. For details on Nix flakes, please see the documentation at https://nixos.wiki/wiki/Flakes.
+
+After this, IHaskell can be compiled as follows:
+
+```bash
+nix develop # This opens a new shell with all dependencies installed
+cabal update # Make sure Cabal's package index is up-to-date
+cabal build # Builds IHaskell
+```
+
+Note that this shell also provides `haskell-language-server`, which can be used in your editor if it supports it. Opening your editor from within the `nix develop` shell should allow it to see `haskell-language-server`.
+
 # Troubleshooting
 
 ## Where are my packages? (IHaskell + Stack)
 
 Stack manages separate environments for every package. By default your notebooks
 will only have access to a few packages that happen to be required for
-ihaskell. To make packages available add them to the stack.yaml in the ihaskell
-directory and run `stack solver && stack install`.
+IHaskell. To make packages available add them to the stack.yaml in the IHaskell
+directory and run `stack install --fast`.
 
 Packages should be added to the `packages:` section and can take the following
 form
@@ -300,14 +225,3 @@ with an `lts-9` project the mismatch between GHC 8.2 and GHC 8.0 will cause
 this error. Stack also has the notion of a 'global project' located at
 `~/.stack/global-project/` and the `stack.yaml` for that project should be on
 the same LTS as the version of IHaskell installed to avoid this issue.
-
-## openFile: does not exist (Stack + Docker)
-
-If you try to run a notebook with `stack --docker` and see an IHaskell kernel
-error that looks like this:
-
-```
-ihaskell: /opt/ghc/8.6.5/lib/ghc-8.6.5/settings: openFile: does not exist
-```
-
-Then delete your `~/.stack` directory and start over.

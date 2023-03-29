@@ -20,7 +20,6 @@ import           IHaskellPrelude
 import           Data.Char (toLower)
 import           Data.List (maximumBy, inits)
 import           Prelude (head, tail)
-import           Control.Monad (msum)
 
 #if MIN_VERSION_ghc(8,4,0)
 import           GHC hiding (Located, Parsed)
@@ -62,8 +61,10 @@ data DirectiveType = GetType      -- ^ Get the type of an expression via ':type'
                    | SearchHoogle -- ^ Search for something via Hoogle.
                    | GetDoc       -- ^ Get documentation for an identifier via Hoogle.
                    | GetKind      -- ^ Get the kind of a type via ':kind'.
+                   | GetKindBang  -- ^ Get the kind and normalised type via ':kind!'.
                    | LoadModule   -- ^ Load and unload modules via ':module'.
                    | SPrint       -- ^ Print without evaluating via ':sprint'.
+                   | Reload       -- ^ Reload.
   deriving (Show, Eq)
 
 -- | Pragma types. Only LANGUAGE pragmas are currently supported. Other pragma types are kept around
@@ -277,6 +278,7 @@ parseDirective (':':directive) ln =
       [ (LoadModule, "module")
       , (GetType, "type")
       , (GetKind, "kind")
+      , (GetKindBang, "kind!")
       , (GetInfo, "info")
       , (SearchHoogle, "hoogle")
       , (GetDoc, "documentation")
@@ -286,6 +288,7 @@ parseDirective (':':directive) ln =
       , (SetExtension, "extension")
       , (GetHelp, "?")
       , (GetHelp, "help")
+      , (Reload, "reload")
       , (SPrint, "sprint")
       ]
 parseDirective _ _ = error "Directive must start with colon!"

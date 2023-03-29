@@ -7,13 +7,13 @@ name:                ihaskell
 -- PVP summary:      +--+------- breaking API changes
 --                   |  | +----- non-breaking API additions
 --                   |  | | +--- code changes with no API change
-version:             0.10.1.1
+version:             0.10.3.0
 
 -- A short (one-line) description of the package.
-synopsis:            A Haskell backend kernel for the IPython project.
+synopsis:            A Haskell backend kernel for the Jupyter project.
 
 -- A longer description of the package.
-description:         IHaskell is a Haskell backend kernel for the IPython project. This allows using Haskell via
+description:         IHaskell is a Haskell backend kernel for the Jupyter project. This allows using Haskell via
                      a console or notebook interface. Additional packages may be installed to provide richer data visualizations.
 
 -- URL for the project homepage or repository.
@@ -40,11 +40,19 @@ category:            Development
 build-type:          Simple
 
 -- Constraint on the version of Cabal needed to build this package.
-cabal-version:       >=1.16
+cabal-version:       1.16
 
 data-files:
     html/kernel.js
     html/logo-64x64.svg
+    jupyterlab-ihaskell/labextension/package.json
+    jupyterlab-ihaskell/labextension/static/*.js
+    jupyterlab-ihaskell/labextension/static/*.json
+
+flag use-hlint
+  description: Include HLint support
+  default:     True
+  manual:      True
 
 library
   hs-source-dirs:      src
@@ -55,40 +63,38 @@ library
     ghc-options:       -Wpartial-fields
 
   build-depends:
+                       base                 >=4.9 && <4.18,
+                       binary               ,
+                       containers           ,
+                       directory            ,
+                       bytestring           ,
+                       exceptions           ,
+                       filepath             ,
+                       ghc                  >=8.0 && <9.5,
+                       ghc-boot             ,
+                       haskeline            ,
+                       parsec               ,
+                       process              ,
+                       random               ,
+                       stm                  ,
+                       text                 ,
+                       time                 ,
+                       transformers         ,
+                       unix                 ,
                        aeson                >=1.0,
-                       base                 >=4.9,
                        base64-bytestring    >=1.0,
-                       bytestring           >=0.10,
-                       cereal               >=0.3,
                        cmdargs              >=0.10,
-                       containers           >=0.5,
-                       directory            -any,
-                       filepath             -any,
-                       ghc                  >=8.0,
                        ghc-parser           >=0.2.1,
                        ghc-paths            >=0.1,
-                       haskeline            -any,
-                       hlint                >=1.9,
-                       haskell-src-exts     >=1.18,
-                       http-client          >= 0.4,
-                       http-client-tls      >= 0.2,
-                       mtl                  >=2.1,
-                       parsec               -any,
-                       process              >=1.1,
-                       random               >=1.0,
+                       http-client          >=0.4,
+                       http-client-tls      >=0.2,
                        shelly               >=1.5,
-                       split                >= 0.2,
-                       stm                  -any,
+                       split                >=0.2,
                        strict               >=0.3,
-                       text                 >=0.11,
-                       time                 >= 1.6,
-                       transformers         -any,
-                       unix                 >= 2.6,
                        unordered-containers -any,
                        utf8-string          -any,
                        vector               -any,
-                       ipython-kernel       >=0.10.2.0,
-                       ghc-boot             >=8.0 && <8.11
+                       ipython-kernel       >=0.10.2.0
 
   exposed-modules: IHaskell.Display
                    IHaskell.Convert
@@ -99,7 +105,6 @@ library
                    IHaskell.Eval.Inspect
                    IHaskell.Eval.Evaluate
                    IHaskell.Eval.Info
-                   IHaskell.Eval.Lint
                    IHaskell.Eval.Parser
                    IHaskell.Eval.Hoogle
                    IHaskell.Eval.ParseShell
@@ -116,6 +121,14 @@ library
                    IHaskellPrelude
   other-modules:
                    StringUtils
+
+  if flag(use-hlint)
+    exposed-modules: IHaskell.Eval.Lint
+    build-depends: hlint >=1.9
+    cpp-options: -DUSE_HLINT
+
+  if flag(use-hlint) && impl (ghc < 8.10)
+    build-depends: haskell-src-exts     >=1.18
 
 executable ihaskell
   -- .hs or .lhs file containing the Main module.
@@ -134,21 +147,20 @@ executable ihaskell
   -- Other library packages from which modules are imported.
   default-language:    Haskell2010
   build-depends:
-                       ihaskell -any,
-                       base                 >=4.9 && < 4.15,
-                       text                 >=0.11,
-                       transformers         -any,
-                       ghc                  >=8.0 && < 8.11,
-                       process              >=1.1,
-                       aeson                >=0.7,
-                       bytestring           >=0.10,
-                       unordered-containers -any,
-                       containers           >=0.5,
-                       strict               >=0.3,
-                       unix                 >= 2.6,
-                       directory            -any,
-                       ipython-kernel       >=0.10,
-                       unordered-containers -any
+                       base                 ,
+                       bytestring           ,
+                       containers           ,
+                       directory            ,
+                       text                 ,
+                       transformers         ,
+                       ghc                  ,
+                       process              ,
+                       unix                 ,
+                       aeson                ,
+                       ihaskell             ,
+                       ipython-kernel       ,
+                       strict               ,
+                       unordered-containers
 
 Test-Suite hspec
     Type: exitcode-stdio-1.0
@@ -168,16 +180,16 @@ Test-Suite hspec
     default-language: Haskell2010
     build-depends:
         base,
-        ihaskell,
-        here,
-        hspec,
-        hspec-contrib,
-        HUnit,
         ghc,
         ghc-paths,
         transformers,
         directory,
         text,
+        ihaskell,
+        here,
+        hspec,
+        hspec-contrib,
+        HUnit,
         shelly,
         raw-strings-qq,
         setenv

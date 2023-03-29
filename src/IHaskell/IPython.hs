@@ -8,9 +8,9 @@ module IHaskell.IPython (
     getIHaskellDir,
     getSandboxPackageConf,
     subHome,
-    kernelName,
     KernelSpecOptions(..),
     defaultKernelSpecOptions,
+    installLabextension,
     ) where
 
 import           IHaskellPrelude
@@ -39,9 +39,13 @@ data KernelSpecOptions =
          { kernelSpecGhcLibdir :: String           -- ^ GHC libdir.
          , kernelSpecRTSOptions :: [String]        -- ^ Runtime options to use.
          , kernelSpecDebug :: Bool                 -- ^ Spew debugging output?
+         , kernelSpecCodeMirror :: String          -- ^ CodeMirror mode
          , kernelSpecConfFile :: IO (Maybe String) -- ^ Filename of profile JSON file.
          , kernelSpecInstallPrefix :: Maybe String
          , kernelSpecUseStack :: Bool              -- ^ Whether to use @stack@ environments.
+         , kernelSpecEnvFile :: Maybe FilePath
+         , kernelSpecKernelName :: String          -- ^ The IPython kernel name
+         , kernelSpecDisplayName :: String         -- ^ The IPython kernel display name
          }
 
 defaultKernelSpecOptions :: KernelSpecOptions
@@ -50,14 +54,14 @@ defaultKernelSpecOptions = KernelSpecOptions
   , kernelSpecRTSOptions = ["-M3g", "-N2"]  -- Memory cap 3 GiB,
                                             -- multithreading on two processors.
   , kernelSpecDebug = False
+  , kernelSpecCodeMirror = "ihaskell"
   , kernelSpecConfFile = defaultConfFile
   , kernelSpecInstallPrefix = Nothing
   , kernelSpecUseStack = False
+  , kernelSpecEnvFile = Nothing
+  , kernelSpecKernelName = "haskell"
+  , kernelSpecDisplayName = "Haskell"
   }
-
--- | The IPython kernel name.
-kernelName :: String
-kernelName = "haskell"
 
 ipythonCommand :: SH.Sh SH.FilePath
 ipythonCommand = do
@@ -129,6 +133,8 @@ installKernelspec repl opts = void $ do
   ihaskellPath <- getIHaskellPath
   confFile <- liftIO $ kernelSpecConfFile opts
 
+  let kernelName = kernelSpecKernelName opts
+
   let kernelFlags :: [String]
       kernelFlags =
         ["--debug" | kernelSpecDebug opts] ++
@@ -142,7 +148,7 @@ installKernelspec repl opts = void $ do
            ++ ["--stack" | kernelSpecUseStack opts]
 
   let kernelSpec = KernelSpec
-        { kernelDisplayName = "Haskell"
+        { kernelDisplayName = kernelSpecDisplayName opts
         , kernelLanguage = kernelName
         , kernelCommand = [ihaskellPath, "kernel", "{connection_file}"] ++ kernelFlags
         }
@@ -166,7 +172,33 @@ installKernelspec repl opts = void $ do
         installPrefixFlag = maybe ["--user"] (\prefix -> ["--prefix", T.pack prefix]) (kernelSpecInstallPrefix opts)
         cmd = concat [["kernelspec", "install"], installPrefixFlag, [SH.toTextIgnore kernelDir], replaceFlag]
 
-    SH.silently $ SH.run ipython cmd
+    let transformOutput = if kernelSpecDebug opts then id else SH.silently
+    transformOutput $ SH.run ipython cmd
+
+installLabextension :: Bool -> IO ()
+installLabextension debug = SH.shelly $ do
+  -- Find the prebuilt extension directory
+  ihaskellDataDir <- liftIO $ Paths.getDataDir
+  let labextensionDataDir = ihaskellDataDir
+        SH.</> ("jupyterlab-ihaskell" :: SH.FilePath)
+        SH.</> ("labextension" :: SH.FilePath)
+
+  -- Find the $(jupyter --data-dir)/labextensions/jupyterlab-ihaskell directory
+  jupyter <- locateIPython
+  jupyterDataDir <- SH.silently $ SH.fromText . T.strip <$> SH.run jupyter ["--data-dir"]
+  let jupyterlabIHaskellDir = jupyterDataDir
+        SH.</> ("labextensions" :: SH.FilePath)
+        SH.</> ("jupyterlab-ihaskell" :: SH.FilePath)
+
+  when debug (putStrLn $ "Installing kernel in folder: " ++ show jupyterlabIHaskellDir)
+  -- Remove the extension directory with extreme prejudice if it already exists
+  SH.rm_rf jupyterlabIHaskellDir
+  -- Create an empty 'jupyterlab-ihaskell' directory to install our extension in
+  SH.mkdir_p jupyterlabIHaskellDir
+  -- Copy the prebuilt extension files over
+  extensionContents <- SH.ls labextensionDataDir
+  forM_ extensionContents $ \entry ->
+    SH.cp_r entry jupyterlabIHaskellDir
 
 -- | Replace "~" with $HOME if $HOME is defined. Otherwise, do nothing.
 subHome :: String -> IO String

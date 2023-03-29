@@ -29,8 +29,11 @@ data Argument = ConfFile String     -- ^ A file with commands to load at startup
               | RTSFlags [String]   -- ^ Options for the GHC runtime (e.g. heap-size limit
                                     --     or number of threads).
               | KernelDebug         -- ^ Spew debugging output from the kernel.
+              | KernelName String   -- ^ The IPython kernel directory name.
+              | DisplayName String  -- ^ The IPython display name.
               | Help                -- ^ Display help text.
               | Version             -- ^ Display version text.
+              | CodeMirror String   -- ^ change codemirror mode (default=ihaskell)
               | ConvertFrom String
               | ConvertTo String
               | ConvertFromFormat NotebookFormat
@@ -38,6 +41,7 @@ data Argument = ConfFile String     -- ^ A file with commands to load at startup
               | ConvertLhsStyle (LhsStyle String)
               | KernelspecInstallPrefix String
               | KernelspecUseStack
+              | KernelspecEnvFile FilePath
   deriving (Eq, Show)
 
 data LhsStyle string =
@@ -113,11 +117,39 @@ kernelDebugFlag = flagNone ["debug"] addDebug "Print debugging output from the k
   where
     addDebug (Args md prev) = Args md (KernelDebug : prev)
 
+kernelNameFlag :: Flag Args
+kernelNameFlag =
+  flagReq
+    ["kernel-name"]
+    (store KernelName)
+    "<name>"
+    "The directory name of the kernel."
+
+displayNameFlag :: Flag Args
+displayNameFlag =
+  flagReq
+    ["display-name"]
+    (store DisplayName)
+    "<name>"
+    "The display name of the kernel."
+
+kernelCodeMirrorFlag :: Flag Args
+kernelCodeMirrorFlag = flagReq ["codemirror"] (store CodeMirror) "<codemirror>"
+        "Specify codemirror mode that is used for syntax highlighting (default: ihaskell)."
+
 kernelStackFlag :: Flag Args
 kernelStackFlag = flagNone ["stack"] addStack
                     "Inherit environment from `stack` when it is installed"
   where
     addStack (Args md prev) = Args md (KernelspecUseStack : prev)
+
+kernelEnvFileFlag :: Flag Args
+kernelEnvFileFlag =
+  flagReq
+    ["env-file"]
+    (store KernelspecEnvFile)
+    "<file>"
+    "Load environment from this file when kernel is installed"
 
 confFlag :: Flag Args
 confFlag = flagReq ["conf", "c"] (store ConfFile) "<rc.hs>"
@@ -139,11 +171,11 @@ store constructor str (Args md prev) = Right $ Args md $ constructor str : prev
 installKernelSpec :: Mode Args
 installKernelSpec =
   mode "install" (Args InstallKernelSpec []) "Install the Jupyter kernelspec." noArgs
-    [ghcLibFlag, ghcRTSFlag, kernelDebugFlag, confFlag, installPrefixFlag, helpFlag, kernelStackFlag]
+    [ghcLibFlag, ghcRTSFlag, kernelDebugFlag, kernelNameFlag, displayNameFlag, confFlag, installPrefixFlag, helpFlag, kernelStackFlag, kernelEnvFileFlag]
 
 kernel :: Mode Args
 kernel = mode "kernel" (Args (Kernel Nothing) []) "Invoke the IHaskell kernel." kernelArg
-           [ghcLibFlag, kernelDebugFlag, confFlag, kernelStackFlag]
+           [ghcLibFlag, kernelDebugFlag, confFlag, kernelStackFlag, kernelEnvFileFlag, kernelCodeMirrorFlag]
   where
     kernelArg = flagArg update "<json-kernel-file>"
     update filename (Args _ flags) = Right $ Args (Kernel $ Just filename) flags

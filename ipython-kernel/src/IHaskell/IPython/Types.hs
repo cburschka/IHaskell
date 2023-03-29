@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, DeriveDataTypeable, DeriveGeneric, GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE OverloadedStrings, DeriveDataTypeable, DeriveGeneric, GeneralizedNewtypeDeriving, CPP #-}
 {-# OPTIONS_GHC -fno-warn-unused-binds -fno-warn-name-shadowing -fno-warn-unused-matches #-}
 
 -- | This module contains all types used to create an IPython language kernel.
@@ -35,9 +35,9 @@ module IHaskell.IPython.Types (
     DisplayData(..),
     MimeType(..),
     extractPlain,
+    displayDataToJson,
     ) where
 
-import           Control.Applicative ((<$>), (<*>))
 import           Data.Aeson
 import           Data.Aeson.Types (typeMismatch)
 import           Data.ByteString (ByteString)
@@ -46,14 +46,17 @@ import           Data.Map (Map)
 import qualified Data.Map as Map
 import           Data.Maybe (fromMaybe)
 import           Data.Semigroup (Semigroup)
-import           Data.Serialize
-import           Data.Serialize.Text ()
+import           Data.Binary
 import           Data.Text (Text, pack)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import           Data.Typeable
 import           GHC.Generics (Generic)
 import           IHaskell.IPython.Message.UUID
+
+#if MIN_VERSION_aeson(2,0,0)
+import           Data.Aeson.Key
+#endif
 
 ------------------ IPython Kernel Profile Types ----------------------
 --
@@ -221,8 +224,8 @@ showMessageType StatusMessage = "status"
 showMessageType StreamMessage = "stream"
 showMessageType DisplayDataMessage = "display_data"
 showMessageType UpdateDisplayDataMessage = "update_display_data"
-showMessageType OutputMessage = "pyout"
-showMessageType InputMessage = "pyin"
+showMessageType OutputMessage = "execute_result"
+showMessageType InputMessage = "execute_input"
 showMessageType IsCompleteRequestMessage = "is_complete_request"
 showMessageType IsCompleteReplyMessage = "is_complete_reply"
 showMessageType CompleteRequestMessage = "complete_request"
@@ -281,6 +284,10 @@ instance FromJSON MessageType where
       _                     -> fail ("Unknown message type: " ++ show s)
   parseJSON _ = fail "Must be a string."
 
+-- | Kernel language info, see
+--
+-- * https://jupyter-client.readthedocs.io/en/stable/messaging.html#kernel-info
+-- * https://jupyter-client.readthedocs.io/en/stable/wrapperkernels.html#MyKernel.language_info
 data LanguageInfo =
        LanguageInfo
          { languageName :: String        -- ^ The language name, e.g. "haskell"
@@ -288,6 +295,7 @@ data LanguageInfo =
          , languageFileExtension :: String        -- ^ .hs
          , languageCodeMirrorMode :: String        -- ^ 'ihaskell'. can be 'null'
          , languagePygmentsLexer :: String
+         , languageMimeType :: String       -- "text/x-haskell"
          }
   deriving (Show, Eq)
 
@@ -298,6 +306,7 @@ instance ToJSON LanguageInfo where
                   , "file_extension" .= languageFileExtension info
                   , "codemirror_mode" .= languageCodeMirrorMode info
                   , "pygments_lexer" .= languagePygmentsLexer info
+                  , "mimetype" .= languageMimeType info
                   ]
 
 data CodeReview = CodeComplete
@@ -317,6 +326,9 @@ instance ToJSON Transient where
                     ]
 
 -- | A message used to communicate with the IPython frontend.
+--
+-- See
+-- https://jupyter-client.readthedocs.io/en/stable/messaging.html
 data Message =
              -- | A request from a frontend for information about the kernel.
               KernelInfoRequest { header :: MessageHeader }
@@ -378,7 +390,7 @@ data Message =
              |
              -- | An error reply to an execute request
                ExecuteError
-                 { header :: MessageHeader
+                 { header :: MessageHeader              -- ^ Unused field retained for backwards compatibility.
                  , traceback :: [Text]
                  , ename :: Text
                  , evalue :: Text
@@ -561,17 +573,19 @@ instance ToJSON Message where
                         , "data" .= object (map displayDataToJson o)
                         ]
                     ]
-  toJSON ExecuteError { header = header, traceback = traceback, ename = ename, evalue = evalue } =
+  -- `header` is not a supported field, but removing it would complicate things
+  -- downstream in terms of dependency bounds so we just drop it on the floor
+  toJSON ExecuteError { header = _header, traceback = traceback, ename = ename, evalue = evalue } =
     object
-      [ "header" .= show header
-      , "traceback" .= map toJSON traceback
+      [ "traceback" .= map toJSON traceback
       , "ename" .= ename
       , "evalue" .= evalue
       ]
   toJSON PublishStatus { executionState = executionState } =
     object ["execution_state" .= executionState]
   toJSON PublishStream { streamType = streamType, streamContent = content } =
-    object ["data" .= content, "name" .= streamType]
+    -- Since 5.0 "data" key was renamed to "text""
+    object ["text" .= content, "name" .= streamType, "output_type" .= string "stream"]
   toJSON r@PublishDisplayData { displayData = datas }
     = object
     $ case transient r of
@@ -663,6 +677,162 @@ instance ToJSON Message where
       indent x = ["indent" .= pack x]
 
   toJSON body = error $ "Do not know how to convert to JSON for message " ++ show body
+
+  toEncoding rep@KernelInfoReply{} =
+    pairs $ mconcat
+      [ "protocol_version" .= protocolVersion rep
+      , "banner" .= banner rep
+      , "implementation" .= implementation rep
+      , "implementation_version" .= implementationVersion rep
+      , "language_info" .= languageInfo rep
+      , "status" .= show (status rep)
+      ]
+
+  toEncoding CommInfoReply
+    { header = header
+    , commInfo = commInfo
+    } =
+    pairs $ mconcat
+      [ "comms" .= Map.map (\comm -> object ["target_name" .= comm]) commInfo
+      , "status" .= string "ok"
+      ]
+
+  toEncoding ExecuteRequest
+    { getCode = code
+    , getSilent = silent
+    , getStoreHistory = storeHistory
+    , getAllowStdin = allowStdin
+    , getUserExpressions = userExpressions
+    } =
+    pairs $ mconcat
+      [ "code" .= code
+      , "silent" .= silent
+      , "store_history" .= storeHistory
+      , "allow_stdin" .= allowStdin
+      , "user_expressions" .= userExpressions
+      ]
+
+  toEncoding ExecuteReply { status = status, executionCounter = counter, pagerOutput = pager } =
+    pairs $ mconcat
+      [ "status" .= show status
+      , "execution_count" .= counter
+      , "payload" .=
+        if null pager
+          then []
+          else mkPayload pager
+      , "user_expressions" .= emptyMap
+      ]
+    where
+      mkPayload o = [ object
+                        [ "source" .= string "page"
+                        , "start" .= Number 0
+                        , "data" .= object (map displayDataToJson o)
+                        ]
+                    ]
+  -- `header` is not a supported field, but removing it would complicate things
+  -- downstream in terms of dependency bounds so we just drop it on the floor
+  toEncoding ExecuteError { header = _header, traceback = traceback, ename = ename, evalue = evalue } =
+    pairs $ mconcat
+      [ "traceback" .= map toJSON traceback
+      , "ename" .= ename
+      , "evalue" .= evalue
+      ]
+  toEncoding PublishStatus { executionState = executionState } =
+    pairs $ mconcat ["execution_state" .= executionState]
+  toEncoding PublishStream { streamType = streamType, streamContent = content } =
+    -- Since 5.0 "data" key was renamed to "text""
+    pairs $ mconcat ["text" .= content, "name" .= streamType, "output_type" .= string "stream"]
+  toEncoding r@PublishDisplayData { displayData = datas }
+    = pairs $ mconcat
+    $ case transient r of
+        Just t  -> (("transient" .= toJSON (transient r)) :)
+        Nothing -> id
+    $ ["metadata" .= object []
+      , "data" .= object (map displayDataToJson datas)
+      ]
+  toEncoding r@PublishUpdateDisplayData { displayData = datas }
+    = pairs $ mconcat
+    $ case transient r of
+        Just t  -> (("transient" .= toJSON (transient r)) :)
+        Nothing -> id
+    $ ["metadata" .= object []
+      , "data" .= object (map displayDataToJson datas)
+      ]
+  toEncoding PublishOutput { executionCount = execCount, reprText = reprText } =
+    pairs $ mconcat
+      [ "data" .= object ["text/plain" .= reprText]
+      , "execution_count" .= execCount
+      , "metadata" .= object []
+      ]
+  toEncoding PublishInput { executionCount = execCount, inCode = code } =
+    pairs $ mconcat ["execution_count" .= execCount, "code" .= code]
+  toEncoding (CompleteReply _ matches start end metadata status) =
+    pairs $ mconcat
+      [ "matches" .= matches
+      , "cursor_start" .= start
+      , "cursor_end" .= end
+      , "metadata" .= metadata
+      , "status" .= if status
+                      then string "ok"
+                      else "error"
+      ]
+  toEncoding i@InspectReply{} =
+    pairs $ mconcat
+      [ "status" .= if inspectStatus i
+                      then string "ok"
+                      else "error"
+      , "data" .= object (map displayDataToJson . inspectData $ i)
+      , "metadata" .= object []
+      , "found" .= inspectStatus i
+      ]
+
+  toEncoding ShutdownReply { restartPending = restart } =
+    pairs $ mconcat ["restart" .= restart
+                    , "status" .= string "ok"
+                    ]
+
+  toEncoding ClearOutput { wait = wait } =
+    pairs $ mconcat ["wait" .= wait]
+
+  toEncoding RequestInput { inputPrompt = prompt } =
+    pairs $ mconcat ["prompt" .= prompt]
+
+  toEncoding req@CommOpen{} =
+    pairs $ mconcat
+      [ "comm_id" .= commUuid req
+      , "target_name" .= commTargetName req
+      , "target_module" .= commTargetModule req
+      , "data" .= commData req
+      ]
+
+  toEncoding req@CommData{} =
+    pairs $ mconcat ["comm_id" .= commUuid req, "data" .= commData req]
+
+  toEncoding req@CommClose{} =
+    pairs $ mconcat ["comm_id" .= commUuid req, "data" .= commData req]
+
+  toEncoding req@HistoryReply{} =
+    pairs $ mconcat ["history" .= map tuplify (historyReply req)
+                    , "status" .= string "ok"
+                    ]
+    where
+      tuplify (HistoryReplyElement sess linum res) = (sess, linum, case res of
+                                                                     Left inp         -> toJSON inp
+                                                                     Right (inp, out) -> toJSON out)
+
+  toEncoding req@IsCompleteReply{} =
+    pairs $ mconcat replyPairs
+    where
+      replyPairs =
+        case reviewResult req of
+          CodeComplete       -> status "complete"
+          CodeIncomplete ind -> status "incomplete" ++ indent ind
+          CodeInvalid        -> status "invalid"
+          CodeUnknown        -> status "unknown"
+      status x = ["status" .= pack x]
+      indent x = ["indent" .= pack x]
+
+  toEncoding body = error $ "Do not know how to convert to JSON for message " ++ show body
 
 
 
@@ -757,9 +927,9 @@ data DisplayData = DisplayData MimeType Text
 instance Show DisplayData where
   show _ = "DisplayData"
 
-instance Serialize DisplayData
+instance Binary DisplayData
 
-instance Serialize MimeType
+instance Binary MimeType
 
 -- | Possible MIME types for the display data.
 type Width = Int
@@ -780,6 +950,7 @@ data MimeType = PlainText
               | MimeVega
               | MimeVegalite
               | MimeVdom
+              | MimeWidget
               | MimeCustom Text
   deriving (Eq, Typeable, Generic)
 
@@ -805,9 +976,10 @@ instance Show MimeType where
   show MimeMarkdown = "text/markdown"
   show MimeJavascript = "application/javascript"
   show MimeJson = "application/json"
-  show MimeVega = "application/vnd.vega.v2+json"
-  show MimeVegalite = "application/vnd.vegalite.v2+json"
+  show MimeVega = "application/vnd.vega.v5+json"
+  show MimeVegalite = "application/vnd.vegalite.v4+json"
   show MimeVdom = "application/vdom.v1+json"
+  show MimeWidget = "application/vnd.jupyter.widget-view+json"
   show (MimeCustom custom) = Text.unpack custom
 
 instance Read MimeType where
@@ -822,12 +994,26 @@ instance Read MimeType where
   readsPrec _ "text/markdown" = [(MimeMarkdown, "")]
   readsPrec _ "application/javascript" = [(MimeJavascript, "")]
   readsPrec _ "application/json" = [(MimeJson, "")]
-  readsPrec _ "application/vnd.vega.v2+json" = [(MimeVega, "")]
-  readsPrec _ "application/vnd.vegalite.v1+json" = [(MimeVegalite, "")]
+  readsPrec _ "application/vnd.vega.v5+json" = [(MimeVega, "")]
+  readsPrec _ "application/vnd.vegalite.v4+json" = [(MimeVegalite, "")]
   readsPrec _ "application/vdom.v1+json" = [(MimeVdom, "")]
+  readsPrec _ "application/vnd.jupyter.widget-view+json" = [(MimeWidget, "")]
   readsPrec _ t = [(MimeCustom (Text.pack t), "")]
 
 -- | Convert a MIME type and value into a JSON dictionary pair.
+#if MIN_VERSION_aeson(2,0,0)
+displayDataToJson :: DisplayData -> (Key, Value)
+displayDataToJson (DisplayData MimeJson dataStr) =
+    fromText (pack (show MimeJson)) .= fromMaybe (String "") (decodeStrict (Text.encodeUtf8 dataStr) :: Maybe Value)
+displayDataToJson (DisplayData MimeVegalite dataStr) =
+    fromText (pack (show MimeVegalite)) .= fromMaybe (String "") (decodeStrict (Text.encodeUtf8 dataStr) :: Maybe Value)
+displayDataToJson (DisplayData MimeVega dataStr) =
+    fromText (pack (show MimeVega)) .= fromMaybe (String "") (decodeStrict (Text.encodeUtf8 dataStr) :: Maybe Value)
+displayDataToJson (DisplayData MimeWidget dataStr) =
+    fromText (pack (show MimeWidget)) .= fromMaybe (object []) (decodeStrict (Text.encodeUtf8 dataStr) :: Maybe Value)
+displayDataToJson (DisplayData mimeType dataStr) =
+    fromText (pack (show mimeType)) .= String dataStr
+#else
 displayDataToJson :: DisplayData -> (Text, Value)
 displayDataToJson (DisplayData MimeJson dataStr) =
     pack (show MimeJson) .= fromMaybe (String "") (decodeStrict (Text.encodeUtf8 dataStr) :: Maybe Value)
@@ -835,8 +1021,11 @@ displayDataToJson (DisplayData MimeVegalite dataStr) =
     pack (show MimeVegalite) .= fromMaybe (String "") (decodeStrict (Text.encodeUtf8 dataStr) :: Maybe Value)
 displayDataToJson (DisplayData MimeVega dataStr) =
     pack (show MimeVega) .= fromMaybe (String "") (decodeStrict (Text.encodeUtf8 dataStr) :: Maybe Value)
+displayDataToJson (DisplayData MimeWidget dataStr) =
+    pack (show MimeWidget) .= fromMaybe (object []) (decodeStrict (Text.encodeUtf8 dataStr) :: Maybe Value)
 displayDataToJson (DisplayData mimeType dataStr) =
-  pack (show mimeType) .= String dataStr
+    pack (show mimeType) .= String dataStr
+#endif
 
 string :: String -> String
 string = id

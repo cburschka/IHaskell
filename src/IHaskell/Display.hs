@@ -37,6 +37,7 @@ module IHaskell.Display (
     vega,
     vegalite,
     vdom,
+    widgetdisplay,
     custom,
     many,
 
@@ -47,9 +48,6 @@ module IHaskell.Display (
     encode64,
     base64,
 
-    -- ** Utilities
-    switchToTmpDir,
-
     -- * Internal only use
     displayFromChanEncoded,
     serializeDisplay,
@@ -59,13 +57,12 @@ module IHaskell.Display (
 import           IHaskellPrelude
 import qualified Data.Text as T
 import qualified Data.ByteString.Char8 as CBS
+import qualified Data.ByteString.Lazy as LBS
 
-import           Data.Serialize as Serialize
+import           Data.Binary as Binary
 import qualified Data.ByteString.Base64 as Base64
-import           System.Directory (getTemporaryDirectory, setCurrentDirectory)
 
 import           Control.Concurrent.STM (atomically)
-import           Control.Exception (try)
 import           Control.Concurrent.STM.TChan
 import           System.IO.Unsafe (unsafePerformIO)
 
@@ -90,8 +87,8 @@ html :: String -> DisplayData
 html = DisplayData MimeHtml . T.pack
 
 -- | Generate an SVG display.
-svg :: String -> DisplayData
-svg = DisplayData MimeSvg . T.pack
+svg :: T.Text -> DisplayData
+svg = DisplayData MimeSvg
 
 -- | Generate a LaTeX display.
 latex :: String -> DisplayData
@@ -150,6 +147,10 @@ png width height = DisplayData (MimePng width height)
 jpg :: Width -> Height -> Base64 -> DisplayData
 jpg width height = DisplayData (MimeJpg width height)
 
+-- | Generate a Widget display given the uuid and the view version
+widgetdisplay :: String -> DisplayData
+widgetdisplay = DisplayData MimeWidget .T.pack
+
 -- | Convert from a string into base 64 encoded data.
 encode64 :: String -> Base64
 encode64 str = base64 $ CBS.pack str
@@ -159,8 +160,8 @@ base64 :: ByteString -> Base64
 base64 = E.decodeUtf8 . Base64.encode
 
 -- | For internal use within IHaskell. Serialize displays to a ByteString.
-serializeDisplay :: Display -> ByteString
-serializeDisplay = Serialize.encode
+serializeDisplay :: Display -> LBS.ByteString
+serializeDisplay = Binary.encode
 
 -- | Items written to this chan will be included in the output sent to the frontend (ultimately the
 -- browser), the next time IHaskell has an item to display.
@@ -170,20 +171,11 @@ displayChan = unsafePerformIO newTChanIO
 
 -- | Take everything that was put into the 'displayChan' at that point out, and make a 'Display' out
 -- of it.
-displayFromChanEncoded :: IO ByteString
+displayFromChanEncoded :: IO LBS.ByteString
 displayFromChanEncoded =
-  Serialize.encode <$> Just . many <$> unfoldM (atomically $ tryReadTChan displayChan)
+  Binary.encode <$> Just . many <$> unfoldM (atomically $ tryReadTChan displayChan)
 
 -- | Write to the display channel. The contents will be displayed in the notebook once the current
 -- execution call ends.
 printDisplay :: IHaskellDisplay a => a -> IO ()
 printDisplay disp = display disp >>= atomically . writeTChan displayChan
-
--- | Convenience function for client libraries. Switch to a temporary directory so that any files we
--- create aren't visible. On Unix, this is usually /tmp.
-switchToTmpDir :: IO ()
-switchToTmpDir = void (try switchDir :: IO (Either SomeException ()))
-  where
-    switchDir =
-      getTemporaryDirectory >>=
-      setCurrentDirectory

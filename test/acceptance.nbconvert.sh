@@ -3,7 +3,8 @@
 # Run nbconvert acceptance tests
 # ------------------------------
 #
-# This script must be called from the root directory of IHaskell.
+# This script must be called from the root directory of IHaskell. It requires
+# `jq` to be available in the $PATH.
 #
 # Positional arguments to this script are the invocation for `nbconvert`.
 # For example:
@@ -27,7 +28,13 @@
 
 set -euo pipefail
 
-$* --to=notebook --execute --allow-errors --stdout test/acceptance.nbconvert.in.ipynb > test/acceptance.nbconvert.out.ipynb
+$* --to=notebook --execute --allow-errors test/acceptance.nbconvert.in.ipynb
 
-diff <(grep -v -e 'version' -e 'Line ' test/acceptance.nbconvert.in.ipynb) <(grep -v -e 'version' -e 'Line ' test/acceptance.nbconvert.out.ipynb)
+mv test/acceptance.nbconvert.in.nbconvert.ipynb test/acceptance.nbconvert.out.ipynb
+
+diff \
+  <(grep -v -e 'version' -e 'Line ' -e 'Integral' -e 'Num'  \
+    <(cat test/acceptance.nbconvert.in.ipynb | jq '{"cells": .cells | map(del(.metadata.execution)), "metadata": .metadata}')) \
+  <(grep -v -e 'version' -e 'Line ' -e 'Integral' -e 'Num'  \
+    <(cat test/acceptance.nbconvert.out.ipynb | jq '{"cells": .cells | map(del(.metadata.execution)), "metadata": .metadata}'))
 

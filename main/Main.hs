@@ -14,13 +14,12 @@ import           Control.Concurrent.Chan
 import           Control.Arrow (second)
 import           Data.Aeson hiding (Success)
 import           System.Process (readProcess, readProcessWithExitCode)
-import           System.Exit (exitSuccess, ExitCode(ExitSuccess))
-import           Control.Exception (try, SomeException)
+import           System.Exit (exitSuccess, ExitCode)
+import           Control.Exception (try)
 import           System.Environment (getArgs)
 import           System.Environment (setEnv)
 import           System.Posix.Signals
 import qualified Data.Map as Map
-import qualified Data.HashMap.Strict as HashMap
 import           Data.List (break, last)
 import           Data.Version (showVersion)
 
@@ -43,6 +42,13 @@ import qualified IHaskell.IPython.Stdin as Stdin
 -- Cabal imports.
 import           Paths_ihaskell(version)
 
+#if MIN_VERSION_aeson(2,0,0)
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Aeson.Key as Key
+#else
+import qualified Data.HashMap.Strict as HashMap
+#endif
+
 main :: IO ()
 main = do
   args <- parseFlags <$> getArgs
@@ -56,6 +62,7 @@ ihaskell (Args ConvertLhs args) = showingHelp ConvertLhs args $ convert args
 ihaskell (Args InstallKernelSpec args) = showingHelp InstallKernelSpec args $ do
   let kernelSpecOpts = parseKernelArgs args
   replaceIPythonKernelspec kernelSpecOpts
+  installLabextension (kernelSpecDebug kernelSpecOpts)
 ihaskell (Args (Kernel (Just filename)) args) = do
   let kernelSpecOpts = parseKernelArgs args
   runKernel kernelSpecOpts filename
@@ -88,14 +95,22 @@ parseKernelArgs = foldl' addFlag defaultKernelSpecOptions
       kernelSpecOpts { kernelSpecConfFile = return (Just filename) }
     addFlag kernelSpecOpts KernelDebug =
       kernelSpecOpts { kernelSpecDebug = True }
+    addFlag kernelSpecOpts (CodeMirror codemirror) =
+      kernelSpecOpts { kernelSpecCodeMirror = codemirror }
     addFlag kernelSpecOpts (GhcLibDir libdir) =
       kernelSpecOpts { kernelSpecGhcLibdir = libdir }
+    addFlag kernelSpecOpts (KernelName name) =
+      kernelSpecOpts { kernelSpecKernelName = name}
+    addFlag kernelSpecOpts (DisplayName name) =
+      kernelSpecOpts { kernelSpecDisplayName = name}
     addFlag kernelSpecOpts (RTSFlags rts) =
       kernelSpecOpts { kernelSpecRTSOptions = rts }
     addFlag kernelSpecOpts (KernelspecInstallPrefix prefix) =
       kernelSpecOpts { kernelSpecInstallPrefix = Just prefix }
     addFlag kernelSpecOpts KernelspecUseStack =
       kernelSpecOpts { kernelSpecUseStack = True }
+    addFlag kernelSpecOpts (KernelspecEnvFile fp) =
+      kernelSpecOpts { kernelSpecEnvFile = Just fp }
     addFlag _kernelSpecOpts flag = error $ "Unknown flag" ++ show flag
 
 -- | Run the IHaskell language kernel.
@@ -121,17 +136,16 @@ runKernel kOpts profileSrc = do
     let stack =
           case runResult :: Either SomeException (ExitCode, String, String) of
             Left _ -> False
-            Right (exitCode, stackStdout, _) -> exitCode == ExitSuccess && "The Haskell Tool Stack" `isInfixOf` stackStdout
+            Right (_, stackStdout, stackStderr) -> "The Haskell Tool Stack" `isInfixOf` (stackStdout ++ stackStderr)
 
     -- If we're in a stack directory, use `stack` to set the environment
     -- We can't do this with base <= 4.6 because setEnv doesn't exist.
-    when stack $ do
-      stackEnv <- lines <$> readProcess "stack" ["exec", "env"] ""
-      forM_ stackEnv $ \line ->
-        let (var, val) = break (== '=') line
-        in case tailMay val of
-            Nothing -> return ()
-            Just val' -> setEnv var val'
+    when stack $
+      readProcess "stack" ["exec", "env"] "" >>= parseAndSetEnv
+
+  case kernelSpecEnvFile kOpts of
+    Nothing -> return ()
+    Just envFile -> readFile envFile >>= parseAndSetEnv
 
   -- Serve on all sockets and ports defined in the profile.
   interface <- serveProfile profile debug
@@ -191,7 +205,7 @@ runKernel kOpts profileSrc = do
         else do
           -- Create the reply, possibly modifying kernel state.
           oldState <- liftIO $ takeMVar state
-          (newState, reply) <- replyTo interface request replyHeader oldState
+          (newState, reply) <- replyTo kOpts interface request replyHeader oldState
           liftIO $ putMVar state newState
 
           -- Write the reply to the reply channel.
@@ -207,6 +221,12 @@ runKernel kOpts profileSrc = do
         Nothing
 
     isCommMessage req = mhMsgType (header req) `elem` [CommDataMessage, CommCloseMessage]
+
+    parseAndSetEnv envLines =
+      forM_ (lines envLines) $ \line -> do
+        case break (== '=') line of
+          (_, []) -> return ()
+          (key, _:val) -> setEnv key val
 
 -- Initial kernel state.
 initialKernelState :: IO (MVar KernelState)
@@ -224,11 +244,11 @@ createReplyHeader parent = do
             newMessageId (mhSessionId parent) (mhUsername parent) repType []
 
 -- | Compute a reply to a message.
-replyTo :: ZeroMQInterface -> Message -> MessageHeader -> KernelState -> Interpreter (KernelState, Message)
+replyTo :: KernelSpecOptions -> ZeroMQInterface -> Message -> MessageHeader -> KernelState -> Interpreter (KernelState, Message)
 -- Reply to kernel info requests with a kernel info reply. No computation needs to be done, as a
 -- kernel info reply is a static object (all info is hard coded into the representation of that
 -- message type).
-replyTo interface KernelInfoRequest{} replyHeader state = do
+replyTo kOpts interface KernelInfoRequest{} replyHeader state = do
   let send msg = liftIO $ writeChan (iopubChannel interface) msg
 
   -- Notify the frontend that the Kernel is idle
@@ -246,13 +266,14 @@ replyTo interface KernelInfoRequest{} replyHeader state = do
                 { languageName = "haskell"
                 , languageVersion = VERSION_ghc
                 , languageFileExtension = ".hs"
-                , languageCodeMirrorMode = "ihaskell"
+                , languageCodeMirrorMode = kernelSpecCodeMirror kOpts
                 , languagePygmentsLexer = "Haskell"
+                , languageMimeType = "text/x-haskell" -- https://jupyter-client.readthedocs.io/en/stable/wrapperkernels.html#MyKernel.language_info
                 }
               , status = Ok
               })
 
-replyTo _ CommInfoRequest{} replyHeader state =
+replyTo _ _ CommInfoRequest{} replyHeader state =
   let comms = Map.mapKeys (UUID.uuidToString) (openComms state) in
   return
     (state, CommInfoReply
@@ -262,13 +283,13 @@ replyTo _ CommInfoRequest{} replyHeader state =
 
 -- Reply to a shutdown request by exiting the main thread. Before shutdown, reply to the request to
 -- let the frontend know shutdown is happening.
-replyTo interface ShutdownRequest { restartPending = pending } replyHeader _ = liftIO $ do
+replyTo _ interface ShutdownRequest { restartPending = pending } replyHeader _ = liftIO $ do
   writeChan (shellReplyChannel interface) $ ShutdownReply replyHeader pending
   exitSuccess
 
 -- Reply to an execution request. The reply itself does not require computation, but this causes
 -- messages to be sent to the IOPub socket with the output of the code in the execution request.
-replyTo interface req@ExecuteRequest { getCode = code } replyHeader state = do
+replyTo _ interface req@ExecuteRequest { getCode = code } replyHeader state = do
   -- Convenience function to send a message to the IOPub socket.
   let send msg = liftIO $ writeChan (iopubChannel interface) msg
 
@@ -292,7 +313,10 @@ replyTo interface req@ExecuteRequest { getCode = code } replyHeader state = do
   -- Run code and publish to the frontend as we go.
   let widgetMessageHandler = widgetHandler send replyHeader
       publish = publishResult send replyHeader displayed updateNeeded pOut (usePager state)
-  updatedState <- evaluate state (T.unpack code) publish widgetMessageHandler
+  (updatedState, errorOccurred) <- evaluate state (T.unpack code) publish widgetMessageHandler
+  let executeReplyStatus = case errorOccurred of
+        Success -> Ok
+        Failure -> Err
 
   -- Take pager output if we're using the pager.
   pager <- if usePager state
@@ -303,13 +327,13 @@ replyTo interface req@ExecuteRequest { getCode = code } replyHeader state = do
                      { header = replyHeader
                      , pagerOutput = pager
                      , executionCounter = execCount
-                     , status = Ok
+                     , status = executeReplyStatus
                      })
 
 -- Check for a trailing empty line. If it doesn't exist, we assume the code is incomplete,
 -- otherwise we assume the code is complete. Todo: Implement a mechanism that only requests
 -- a trailing empty line, when multiline code is entered.
-replyTo _ req@IsCompleteRequest{} replyHeader state = do
+replyTo _ _ req@IsCompleteRequest{} replyHeader state = do
   isComplete <- isInputComplete
   let reply  = IsCompleteReply { header = replyHeader, reviewResult = isComplete }
   return (state, reply)
@@ -322,17 +346,21 @@ replyTo _ req@IsCompleteRequest{} replyHeader state = do
          else return $ CodeIncomplete $ indent 4
     indent n = take n $ repeat ' '
 
-replyTo _ req@CompleteRequest{} replyHeader state = do
+replyTo _ _ req@CompleteRequest{} replyHeader state = do
   let code = getCode req
       pos = getCursorPos req
   (matchedText, completions) <- complete (T.unpack code) pos
 
   let start = pos - length matchedText
       end = pos
+#if MIN_VERSION_aeson(2,0,0)
+      reply = CompleteReply replyHeader (map T.pack completions) start end (Metadata KeyMap.empty) True
+#else
       reply = CompleteReply replyHeader (map T.pack completions) start end (Metadata HashMap.empty) True
+#endif
   return (state, reply)
 
-replyTo _ req@InspectRequest{} replyHeader state = do
+replyTo _ _ req@InspectRequest{} replyHeader state = do
   result <- inspect (T.unpack $ inspectCode req) (inspectCursorPos req)
   let reply =
         case result of
@@ -345,7 +373,7 @@ replyTo _ req@InspectRequest{} replyHeader state = do
   return (state, reply)
 
 -- TODO: Implement history_reply.
-replyTo _ HistoryRequest{} replyHeader state = do
+replyTo _ _ HistoryRequest{} replyHeader state = do
   let reply = HistoryReply
         { header = replyHeader
         -- FIXME
@@ -364,7 +392,7 @@ replyTo _ HistoryRequest{} replyHeader state = do
 --
 -- Sending the message only on the shell_reply channel doesn't work, so we send it as a comm message
 -- on the iopub channel and return the SendNothing message.
-replyTo interface ocomm@CommOpen{} replyHeader state = do
+replyTo _ interface ocomm@CommOpen{} replyHeader state = do
   let send = liftIO . writeChan (iopubChannel interface)
 
       incomingUuid = commUuid ocomm
@@ -376,7 +404,11 @@ replyTo interface ocomm@CommOpen{} replyHeader state = do
       commMap = openComms state
       uuidTargetPairs = map (second targetName) $ Map.toList commMap
 
+#if MIN_VERSION_aeson(2,0,0)
+      pairProcessor (x, y) = (Key.fromText $ T.pack (UUID.uuidToString x)) .= object ["target_name" .= T.pack y]
+#else
       pairProcessor (x, y) = T.pack (UUID.uuidToString x) .= object ["target_name" .= T.pack y]
+#endif
 
       currentComms = object $ map pairProcessor $ (incomingUuid, "comm") : uuidTargetPairs
 
@@ -392,7 +424,7 @@ replyTo interface ocomm@CommOpen{} replyHeader state = do
   return (state, SendNothing)
 
 -- TODO: What else can be implemented?
-replyTo _ message _ state = do
+replyTo _ _ message _ state = do
   liftIO $ hPutStrLn stderr $ "Unimplemented message: " ++ show message
   return (state, SendNothing)
 

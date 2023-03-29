@@ -14,18 +14,38 @@ module IHaskell.Eval.Completion (complete, completionTarget, completionType, Com
 
 import           IHaskellPrelude
 
-import           Control.Applicative ((<$>))
 import           Data.Char
-import           Data.List (nub, init, last, elemIndex, concatMap)
+import           Data.List (init, last, elemIndex)
 import qualified Data.List.Split as Split
 import qualified Data.List.Split.Internals as Split
 import           System.Environment (getEnv)
 
 import           GHC
+#if MIN_VERSION_ghc(9,4,0)
+import           GHC.Unit.Database
+import           GHC.Unit.State
+import           GHC.Driver.Env
+import           GHC.Driver.Ppr
+import           GHC.Driver.Session
+import           GHC.Driver.Monad as GhcMonad
+#elif MIN_VERSION_ghc(9,2,0)
+import           GHC.Unit.Database
+import           GHC.Unit.State
+import           GHC.Driver.Ppr
+import           GHC.Driver.Session
+import           GHC.Driver.Monad as GhcMonad
+#elif MIN_VERSION_ghc(9,0,0)
+import           GHC.Unit.Database
+import           GHC.Unit.State
+import           GHC.Driver.Session
+import           GHC.Driver.Monad as GhcMonad
+import           GHC.Utils.Outputable (showPpr)
+#else
 import           GHC.PackageDb
 import           DynFlags
 import           GhcMonad
 import           Outputable (showPpr)
+#endif
 
 import           System.Directory
 import           Control.Exception (try)
@@ -73,10 +93,26 @@ complete code posOffset = do
   let isQualified = ('.' `elem`)
       unqualNames = nub $ filter (not . isQualified) rdrNames
       qualNames = nub $ scopeNames ++ filter isQualified rdrNames
-
+#if MIN_VERSION_ghc(9,4,0)
+  logger <- getLogger
+  hsc_env <- getSession
+  (db, _, _, _) <- liftIO $ initUnits logger flags Nothing (hsc_all_home_unit_ids hsc_env)
+  let getNames = map (moduleNameString . exposedName) . unitExposedModules
+      moduleNames = nub $ concatMap getNames $ concatMap unitDatabaseUnits db
+#elif MIN_VERSION_ghc(9,2,0)
+  logger <- getLogger
+  (db, _, _, _) <- liftIO $ initUnits logger flags Nothing
+  let getNames = map (moduleNameString . exposedName) . unitExposedModules
+      moduleNames = nub $ concatMap getNames $ concatMap unitDatabaseUnits db
+#elif MIN_VERSION_ghc(9,0,0)
+  let Just db = unitDatabases flags
+      getNames = map (moduleNameString . exposedName) . unitExposedModules
+      moduleNames = nub $ concatMap getNames $ concatMap unitDatabaseUnits db
+#else
   let Just db = pkgDatabase flags
       getNames = map (moduleNameString . exposedName) . exposedModules
       moduleNames = nub $ concatMap getNames $ concatMap snd db
+#endif
 
   let target = completionTarget line pos
       completion = completionType line pos target

@@ -9,6 +9,7 @@ module IHaskell.Eval.Util (
     setExtension,
     ExtFlag(..),
     setFlags,
+    setWayDynFlag,
 
     -- * Code Evaluation
     evalImport,
@@ -33,12 +34,59 @@ import qualified Data.ByteString.Char8 as CBS
 #endif
 
 -- GHC imports.
-import           DynFlags
-#if MIN_VERSION_ghc(8,6,0)
+#if MIN_VERSION_ghc(9,4,0)
+import           GHC.Core.InstEnv (is_cls, is_tys, mkInstEnv, instEnvElts)
+import           GHC.Core.Unify
+import           GHC.Types.TyThing.Ppr
+import           GHC.Driver.CmdLine
+import           GHC.Driver.Monad (modifySession)
+import           GHC.Driver.Ppr
+import           GHC.Driver.Session
+import           GHC.Driver.Env.Types
+import           GHC.Platform.Ways
+import           GHC.Runtime.Context
+import           GHC.Types.Name (pprInfixName)
+import           GHC.Types.Name.Set
+import           GHC.Types.TyThing
+import qualified GHC.Driver.Session as DynFlags
+import qualified GHC.Utils.Outputable as O
+import qualified GHC.Utils.Ppr as Pretty
+import           GHC.Runtime.Loader
+#elif MIN_VERSION_ghc(9,2,0)
+import           GHC.Core.InstEnv (is_cls, is_tys)
+import           GHC.Core.Unify
+import           GHC.Types.TyThing.Ppr
+import           GHC.Driver.CmdLine
+import           GHC.Driver.Monad (modifySession)
+import           GHC.Driver.Ppr
+import           GHC.Driver.Session
+import           GHC.Driver.Env.Types
+import           GHC.Platform.Ways
+import           GHC.Runtime.Context
+import           GHC.Types.Name (pprInfixName)
+import           GHC.Types.Name.Set
+import           GHC.Types.TyThing
+import qualified GHC.Driver.Session as DynFlags
+import qualified GHC.Utils.Outputable as O
+import qualified GHC.Utils.Ppr as Pretty
+import           GHC.Runtime.Loader
+#elif MIN_VERSION_ghc(9,0,0)
+import           GHC.Core.InstEnv (is_cls, is_tys)
+import           GHC.Core.Unify
+import           GHC.Core.Ppr.TyThing
+import           GHC.Driver.CmdLine
+import           GHC.Driver.Monad (modifySession)
+import           GHC.Driver.Session
+import           GHC.Driver.Types
+import           GHC.Driver.Ways
+import           GHC.Types.Name (pprInfixName)
+import           GHC.Types.Name.Set
+import qualified GHC.Driver.Session as DynFlags
+import qualified GHC.Utils.Outputable as O
+import qualified GHC.Utils.Ppr as Pretty
+import           GHC.Runtime.Loader
 #else
-import           FastString
-#endif
-import           GHC
+import           DynFlags
 import           GhcMonad
 import           HscTypes
 import           NameSet
@@ -48,14 +96,20 @@ import           InstEnv (ClsInst(..))
 import           Unify (tcMatchTys)
 import qualified Pretty
 import qualified Outputable as O
-
-import           Control.Monad (void)
-import           Data.Function (on)
-import           Data.List (nubBy)
+#if MIN_VERSION_ghc(8,6,0)
+import           DynamicLoading
+#endif
+#endif
+#if MIN_VERSION_ghc(8,6,0)
+#else
+import           FastString
+#endif
+import           GHC
 
 import           StringUtils (replace)
 
-#if MIN_VERSION_ghc(8,4,0)
+#if MIN_VERSION_ghc(9,0,0)
+#elif MIN_VERSION_ghc(8,4,0)
 import           CmdLineParser (warnMsg)
 #endif
 
@@ -85,6 +139,33 @@ extensionFlag ext =
 
     -- Check if a FlagSpec matches "No<ExtensionName>". In that case, we disable the extension.
     flagMatchesNo ex fs = ex == "No" ++ flagSpecName fs
+
+#if MIN_VERSION_ghc(9,2,0)
+-- Taken from GHC
+addWay' :: Way
+        -> DynFlags
+        -> DynFlags
+addWay' w dflags0 =
+  let platform = targetPlatform dflags0
+      dflags1 = dflags0 { targetWays_ = addWay w (targetWays_ dflags0) }
+      dflags2 = foldr setGeneralFlag' dflags1 (wayGeneralFlags platform w)
+      dflags3 = foldr unSetGeneralFlag' dflags2 (wayUnsetGeneralFlags platform w)
+  in dflags3
+#endif
+
+-- | Consult the RTS to find if GHC has been built with dynamic linking and then turn on the
+-- dynamic way for GHC. Otherwise it does nothing.
+setWayDynFlag :: DynFlags
+              -> DynFlags
+setWayDynFlag =
+  if hostIsDynamic
+  then addWay' WayDyn
+  else id
+#if MIN_VERSION_ghc(9,0,0)
+#else
+  where
+    hostIsDynamic = dynamicGhc
+#endif
 
 -- | Pretty-print dynamic flags (taken from 'InteractiveUI' module of `ghc-bin`)
 pprDynFlags :: Bool       -- ^ Whether to include flags which are on by default
@@ -152,6 +233,10 @@ pprLanguages show_all dflags =
         Nothing          -> O.text "Haskell2010"
         Just Haskell98   -> O.text "Haskell98"
         Just Haskell2010 -> O.text "Haskell2010"
+#if MIN_VERSION_ghc(9,4,0)
+        Just GHC2021 -> O.text "GHC2021"
+#else
+#endif
     , (if show_all
          then O.text "all active language options:"
          else O.text "with the following modifiers:") O.$$
@@ -202,12 +287,28 @@ setFlags :: GhcMonad m => [String] -> m [String]
 setFlags ext = do
   -- Try to parse flags.
   flags <- getSessionDynFlags
-  (flags', unrecognized, warnings) <- parseDynamicFlags flags (map noLoc ext)
+#if MIN_VERSION_ghc(9,2,0)
+  logger <- getLogger
+  (flags0, unrecognized, warnings) <- parseDynamicFlags logger flags (map noLoc ext)
+#else
+  (flags0, unrecognized, warnings) <- parseDynamicFlags flags (map noLoc ext)
+#endif
 
-  -- First, try to check if this flag matches any extension name.
-  let restoredPkgs = flags' { packageFlags = packageFlags flags }
-  _ <- GHC.setProgramDynFlags restoredPkgs
-  GHC.setInteractiveDynFlags restoredPkgs
+  -- We can't update packages here
+  let flags1 = flags0 { packageFlags = packageFlags flags }
+
+#if MIN_VERSION_ghc(9,2,0)
+  -- Loading plugins explicitly is no longer required in 9.2
+  let flags2 = flags1
+#elif MIN_VERSION_ghc(8,6,0)
+  -- Plugins were introduced in 8.6
+  hsc_env <- GHC.getSession
+  flags2 <- liftIO (initializePlugins hsc_env flags1)
+#else
+  let flags2 = flags1
+#endif
+  _ <- GHC.setProgramDynFlags flags2
+  GHC.setInteractiveDynFlags flags2
 
   -- Create the parse errors.
   let noParseErrs = map (("Could not parse: " ++) . unLoc) unrecognized
@@ -216,7 +317,8 @@ setFlags ext = do
 #else
       allWarns = map unLoc warnings ++
 #endif
-                 ["-package not supported yet" | packageFlags flags /= packageFlags flags']
+        -- Stack appears to duplicate package flags, so we use `nub` to work around this
+        ["-package not supported yet" | nub (packageFlags flags) /= nub (packageFlags flags0)]
       warnErrs = map ("Warning: " ++) allWarns
   return $ noParseErrs ++ warnErrs
 
@@ -228,14 +330,21 @@ doc :: GhcMonad m => O.SDoc -> m String
 doc sdoc = do
   flags <- getSessionDynFlags
   unqual <- getPrintUnqual
-#if MIN_VERSION_ghc(8,2,0)
+#if MIN_VERSION_ghc(9,0,0)
+  let style = O.mkUserStyle unqual O.AllTheWay
+#elif MIN_VERSION_ghc(8,2,0)
   let style = O.mkUserStyle flags unqual O.AllTheWay
 #else
   let style = O.mkUserStyle unqual O.AllTheWay
 #endif
   let cols = pprCols flags
+#if MIN_VERSION_ghc(9,2,0)
+      d = O.runSDoc sdoc (initSDocContext flags style)
+  return $ Pretty.fullRender (Pretty.PageMode False) cols 1.5 string_txt "" d
+#else
       d = O.runSDoc sdoc (O.initSDocContext flags style)
   return $ Pretty.fullRender Pretty.PageMode cols 1.5 string_txt "" d
+#endif
 
   where
     string_txt :: Pretty.TextDetails -> String -> String
@@ -261,20 +370,39 @@ doc sdoc = do
 initGhci :: GhcMonad m => Maybe String -> m ()
 initGhci sandboxPackages = do
   -- Initialize dyn flags. Start with -XExtendedDefaultRules and -XNoMonomorphismRestriction.
+#if MIN_VERSION_ghc(9,2,0)
+  -- We start handling GHC environment files
+  originalFlagsNoPackageEnv <- getSessionDynFlags
+  logger <- getLogger
+  originalFlags <- liftIO $ interpretPackageEnv logger originalFlagsNoPackageEnv
+#elif MIN_VERSION_ghc(9,0,0)
+  -- We start handling GHC environment files
+  originalFlagsNoPackageEnv <- getSessionDynFlags
+  originalFlags <- liftIO $ interpretPackageEnv originalFlagsNoPackageEnv
+#else
   originalFlags <- getSessionDynFlags
+#endif
   let flag = flip xopt_set
       unflag = flip xopt_unset
-      dflags = flag ExtendedDefaultRules . unflag MonomorphismRestriction $ originalFlags
+      dflags = flag ExtendedDefaultRules . unflag MonomorphismRestriction $ setWayDynFlag originalFlags
 #if MIN_VERSION_ghc(8,2,0)
       pkgFlags =
         case sandboxPackages of
           Nothing -> packageDBFlags originalFlags
           Just path ->
+#if MIN_VERSION_ghc(9,0,0)
+            let pkg = PackageDB $ PkgDbPath path
+#else
             let pkg = PackageDB $ PkgConfFile path
+#endif
             in packageDBFlags originalFlags ++ [pkg]
 
   void $ setSessionDynFlags $ dflags
+#if MIN_VERSION_ghc(9,2,0)
+    { backend = Interpreter
+#else
     { hscTarget = HscInterpreted
+#endif
     , ghcLink = LinkInMemory
     , pprCols = 300
     , packageDBFlags = pkgFlags
@@ -366,7 +494,11 @@ evalDeclarations decl = do
   names <- runDecls decl
   cleanUpDuplicateInstances
   flags <- getSessionDynFlags
+#if MIN_VERSION_ghc(9,2,0)
+  return $ map (replace ":Interactive." "" . showPpr flags) names
+#else
   return $ map (replace ":Interactive." "" . O.showPpr flags) names
+#endif
 
 cleanUpDuplicateInstances :: GhcMonad m => m ()
 cleanUpDuplicateInstances = modifySession $ \hscEnv ->
@@ -375,7 +507,11 @@ cleanUpDuplicateInstances = modifySession $ \hscEnv ->
       ic = hsc_IC hscEnv
       (clsInsts, famInsts) = ic_instances ic
       -- Remove duplicates
+#if MIN_VERSION_ghc(9,4,0)
+      clsInsts' = mkInstEnv $ nubBy instEq $ instEnvElts clsInsts
+#else
       clsInsts' = nubBy instEq clsInsts
+#endif
   in hscEnv { hsc_IC = ic { ic_instances = (clsInsts', famInsts) } }
   where
     instEq :: ClsInst -> ClsInst -> Bool
@@ -393,7 +529,11 @@ getType expr = do
   result <- exprType expr
 #endif
   flags <- getSessionDynFlags
+#if MIN_VERSION_ghc(9,2,0)
+  let typeStr = showSDoc flags $ O.ppr result
+#else
   let typeStr = O.showSDocUnqual flags $ O.ppr result
+#endif
   return typeStr
 
 -- | This is unfoldM from monad-loops. It repeatedly runs an IO action until it return Nothing, and

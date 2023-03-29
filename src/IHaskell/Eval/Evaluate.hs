@@ -23,51 +23,118 @@ import           IHaskellPrelude
 import           Control.Concurrent (forkIO, threadDelay)
 import           Data.Foldable (foldMap)
 import           Prelude (head, tail, last, init)
-import           Data.List (nubBy)
 import qualified Data.Set as Set
 import           Data.Char as Char
 import           Data.Dynamic
-import qualified Data.Serialize as Serialize
-import qualified Debugger
+import qualified Data.Binary as Binary
 import           System.Directory
 import           System.Posix.IO (fdToHandle)
 import           System.IO (hGetChar, hSetEncoding, utf8)
 import           System.Random (getStdGen, randomRs)
 import           System.Process
 import           System.Exit
-import           Data.Maybe (mapMaybe)
 import           System.Environment (getEnv)
 
-import qualified GHC.Paths
-import           InteractiveEval
+#if MIN_VERSION_ghc(9,4,0)
+import qualified GHC.Runtime.Debugger as Debugger
+import           GHC.Runtime.Eval
+import           GHC.Driver.Session
+import           GHC.Unit.State
+import           Control.Monad.Catch as MC
+import           GHC.Utils.Outputable hiding ((<>))
+import           GHC.Data.Bag
+import           GHC.Driver.Backend
+import           GHC.Driver.Env
+import           GHC.Driver.Ppr
+import           GHC.Runtime.Context
+import           GHC.Types.Error
+import           GHC.Types.SourceError
+import           GHC.Unit.Types (UnitId)
+import qualified GHC.Utils.Error as ErrUtils
+#elif MIN_VERSION_ghc(9,2,0)
+import qualified GHC.Runtime.Debugger as Debugger
+import           GHC.Runtime.Eval
+import           GHC.Driver.Session
+import           GHC.Unit.State
+import           Control.Monad.Catch as MC
+import           GHC.Utils.Outputable hiding ((<>))
+import           GHC.Data.Bag
+import           GHC.Driver.Backend
+import           GHC.Driver.Ppr
+import           GHC.Runtime.Context
+import           GHC.Types.SourceError
+import           GHC.Unit.Types (UnitId)
+import qualified GHC.Utils.Error as ErrUtils
+#elif MIN_VERSION_ghc(9,0,0)
+import qualified GHC.Runtime.Debugger as Debugger
+import           GHC.Runtime.Eval
+import           GHC.Driver.Session
+import           GHC.Driver.Types
+import           GHC.Unit.State
+import           Control.Monad.Catch as MC
+import           GHC.Utils.Outputable hiding ((<>))
+import           GHC.Data.Bag
+import           GHC.Unit.Types (UnitId)
+import qualified GHC.Utils.Error as ErrUtils
+#else
+import qualified Debugger
+import           Bag
 import           DynFlags
-import           Exception (gtry)
 import           HscTypes
-import           GhcMonad (liftIO)
-import           GHC hiding (Stmt, TypeSig)
+import           InteractiveEval
 import           Exception hiding (evaluate)
+import           GhcMonad (liftIO)
 import           Outputable hiding ((<>))
 import           Packages
-import           Bag
 import qualified ErrUtils
+#endif
+
+import qualified GHC.Paths
+import           GHC hiding (Stmt, TypeSig)
 
 import           IHaskell.Types
 import           IHaskell.IPython
 import           IHaskell.Eval.Parser
-import           IHaskell.Eval.Lint
 import           IHaskell.Display
 import qualified IHaskell.Eval.Hoogle as Hoogle
 import           IHaskell.Eval.Util
 import           IHaskell.BrokenPackages
 import           StringUtils (replace, split, strip, rstrip)
 
-#if MIN_VERSION_ghc(8,2,0)
+#ifdef USE_HLINT
+import           IHaskell.Eval.Lint
+#endif
+
+#if MIN_VERSION_ghc(9,0,0)
+import           GHC.Data.FastString
+#elif MIN_VERSION_ghc(8,2,0)
 import           FastString (unpackFS)
 #else
 import           Paths_ihaskell (version)
 import           Data.Version (versionBranch)
 #endif
 
+#if MIN_VERSION_ghc(9,2,0)
+showSDocUnqual :: DynFlags -> SDoc -> String
+showSDocUnqual = showSDoc
+#endif
+
+#if MIN_VERSION_ghc(9,0,0)
+gcatch :: Ghc a -> (SomeException -> Ghc a) -> Ghc a
+gcatch = MC.catch
+
+gtry :: IO a -> IO (Either SomeException a)
+gtry = MC.try
+
+gfinally :: Ghc a -> Ghc b -> Ghc a
+gfinally = MC.finally
+
+ghandle :: (MonadCatch m, Exception e) => (e -> m a) -> m a -> m a
+ghandle = MC.handle
+
+throw :: SomeException -> Ghc a
+throw = MC.throwM
+#endif
 
 
 -- | Set GHC's verbosity for debugging
@@ -157,23 +224,69 @@ interpret libdir allowedStdin needsSupportLibraries action = runGhc (Just libdir
   -- Run the rest of the interpreter
   action hasSupportLibraries
 
+#if MIN_VERSION_ghc(9,4,0)
+packageIdString' :: Logger -> DynFlags -> HscEnv -> UnitInfo -> IO String
+packageIdString' logger dflags hsc_env pkg_cfg = do
+    (_, unitState, _, _) <- initUnits logger dflags Nothing (hsc_all_home_unit_ids hsc_env)
+    case (lookupUnit unitState $ mkUnit pkg_cfg) of
+      Nothing -> pure "(unknown)"
+      Just cfg -> let
+        PackageName name = unitPackageName cfg
+        in pure $ unpackFS name
+#elif MIN_VERSION_ghc(9,2,0)
+packageIdString' :: Logger -> DynFlags -> UnitInfo -> IO String
+packageIdString' logger dflags pkg_cfg = do
+    (_, unitState, _, _) <- initUnits logger dflags Nothing
+    case (lookupUnit unitState $ mkUnit pkg_cfg) of
+      Nothing -> pure "(unknown)"
+      Just cfg -> let
+        PackageName name = unitPackageName cfg
+        in pure $ unpackFS name
+#elif MIN_VERSION_ghc(9,0,0)
+packageIdString' :: DynFlags -> UnitInfo -> String
+packageIdString' dflags pkg_cfg =
+    case (lookupUnit (unitState dflags) $ mkUnit pkg_cfg) of
+      Nothing -> "(unknown)"
+      Just cfg -> let
+        PackageName name = unitPackageName cfg
+        in unpackFS name
+#elif MIN_VERSION_ghc(8,2,0)
 packageIdString' :: DynFlags -> PackageConfig -> String
 packageIdString' dflags pkg_cfg =
-#if MIN_VERSION_ghc(8,2,0)
     case (lookupPackage dflags $ packageConfigId pkg_cfg) of
       Nothing -> "(unknown)"
       Just cfg -> let
         PackageName name = packageName cfg
         in unpackFS name
 #else
+packageIdString' :: DynFlags -> PackageConfig -> String
+packageIdString' dflags pkg_cfg =
     fromMaybe "(unknown)" (unitIdPackageIdString dflags $ packageConfigId pkg_cfg)
 #endif
 
+#if MIN_VERSION_ghc(9,4,0)
+getPackageConfigs :: Logger -> DynFlags -> HscEnv -> IO [GenUnitInfo UnitId]
+getPackageConfigs logger dflags hsc_env = do
+    (pkgDb, _, _, _) <- initUnits logger dflags Nothing (hsc_all_home_unit_ids hsc_env)
+    pure $ foldMap unitDatabaseUnits pkgDb
+#elif MIN_VERSION_ghc(9,2,0)
+getPackageConfigs :: Logger -> DynFlags -> IO [GenUnitInfo UnitId]
+getPackageConfigs logger dflags = do
+    (pkgDb, _, _, _) <- initUnits logger dflags Nothing
+    pure $ foldMap unitDatabaseUnits pkgDb
+#elif MIN_VERSION_ghc(9,0,0)
+getPackageConfigs :: DynFlags -> [GenUnitInfo UnitId]
+getPackageConfigs dflags =
+    foldMap unitDatabaseUnits pkgDb
+  where
+    Just pkgDb = unitDatabases dflags
+#else
 getPackageConfigs :: DynFlags -> [PackageConfig]
 getPackageConfigs dflags =
     foldMap snd pkgDb
   where
     Just pkgDb = pkgDatabase dflags
+#endif
 
 -- | Initialize our GHC session with imports and a value for 'it'. Return whether the IHaskell
 -- library is available.
@@ -183,12 +296,36 @@ initializeImports importSupportLibraries = do
   -- version of the ihaskell library. Also verify that the packages we load are not broken.
   dflags <- getSessionDynFlags
   broken <- liftIO getBrokenPackages
+#if MIN_VERSION_ghc(9,2,0)
+  let dflgs = dflags
+#elif MIN_VERSION_ghc(9,0,0)
+  dflgs <- liftIO $ initUnits dflags
+#else
   (dflgs, _) <- liftIO $ initPackages dflags
+#endif
+
+#if MIN_VERSION_ghc(9,4,0)
+  logger <- getLogger
+  hsc_env <- getSession
+  db <- liftIO $ getPackageConfigs logger dflgs hsc_env
+  packageNames <- liftIO $ mapM (packageIdString' logger dflgs hsc_env) db
+  let hiddenPackages = Set.intersection hiddenPackageNames (Set.fromList packageNames)
+      hiddenFlags = fmap HidePackage $ Set.toList hiddenPackages
+      initStr = "ihaskell-"
+#elif MIN_VERSION_ghc(9,2,0)
+  logger <- getLogger
+  db <- liftIO $ getPackageConfigs logger dflgs
+  packageNames <- liftIO $ mapM (packageIdString' logger dflgs) db
+  let hiddenPackages = Set.intersection hiddenPackageNames (Set.fromList packageNames)
+      hiddenFlags = fmap HidePackage $ Set.toList hiddenPackages
+      initStr = "ihaskell-"
+#else
   let db = getPackageConfigs dflgs
       packageNames = map (packageIdString' dflgs) db
       hiddenPackages = Set.intersection hiddenPackageNames (Set.fromList packageNames)
       hiddenFlags = fmap HidePackage $ Set.toList hiddenPackages
       initStr = "ihaskell-"
+#endif
 
 #if MIN_VERSION_ghc(8,2,0)
       -- Name of the ihaskell package, i.e. "ihaskell"
@@ -284,7 +421,7 @@ evaluate :: KernelState                  -- ^ The kernel state.
          -> String                       -- ^ Haskell code or other interpreter commands.
          -> Publisher                    -- ^ Function used to publish data outputs.
          -> (KernelState -> [WidgetMsg] -> IO KernelState) -- ^ Function to handle widget messages
-         -> Interpreter KernelState
+         -> Interpreter (KernelState, ErrorOccurred)
 evaluate kernelState code output widgetHandler = do
   cmds <- parseString (cleanString code)
   let execCount = getExecutionCounter kernelState
@@ -294,13 +431,16 @@ evaluate kernelState code output widgetHandler = do
       justError _ = Nothing
       errs = mapMaybe (justError . unloc) cmds
 
-  updated <- case errs of
+  (updated, errorOccurred) <- case errs of
                -- Only run things if there are no parse errors.
                [] -> do
+
+#ifdef USE_HLINT
                  when (getLintStatus kernelState /= LintOff) $ liftIO $ do
                    lintSuggestions <- lint code cmds
                    unless (noResults lintSuggestions) $
                      output (FinalResult lintSuggestions [] []) Success
+#endif
 
                  runUntilFailure kernelState (map unloc cmds ++ [storeItCommand execCount])
                -- Print all parse errors.
@@ -310,16 +450,16 @@ evaluate kernelState code output widgetHandler = do
                    liftIO $ output
                      (FinalResult (evalResult out) [] [])
                      (evalStatus out)
-                 return kernelState
+                 return (kernelState, Failure)
 
-  return updated { getExecutionCounter = execCount + 1 }
+  return (updated { getExecutionCounter = execCount + 1 }, errorOccurred)
 
   where
     noResults (Display res) = null res
     noResults (ManyDisplay res) = all noResults res
 
-    runUntilFailure :: KernelState -> [CodeBlock] -> Interpreter KernelState
-    runUntilFailure state [] = return state
+    runUntilFailure :: KernelState -> [CodeBlock] -> Interpreter (KernelState, ErrorOccurred)
+    runUntilFailure state [] = return (state, Success)
     runUntilFailure state (cmd:rest) = do
       evalOut <- evalCommand output cmd state
 
@@ -331,9 +471,9 @@ evaluate kernelState code output widgetHandler = do
                         Left err -> error $ "Deserialization error (Evaluate.hs): " ++ err
                         Right displaysIO -> do
                           result <- liftIO displaysIO
-                          case Serialize.decode result of
-                            Left err  -> error $ "Deserialization error (Evaluate.hs): " ++ err
-                            Right res -> return res
+                          case Binary.decodeOrFail result of
+                            Left (_, _, err) -> error $ "Deserialization error (Evaluate.hs): " ++ err
+                            Right (_, _, res) -> return res
                     else return Nothing
       let result =
             case dispsMay of
@@ -356,7 +496,7 @@ evaluate kernelState code output widgetHandler = do
 
       case evalStatus evalOut of
         Success -> runUntilFailure newState rest
-        Failure -> return newState
+        Failure -> return (newState, Failure)
 
     storeItCommand execCount = Statement $ printf "let it%d = it" execCount
 
@@ -404,9 +544,16 @@ flushWidgetMessages state evalmsgs widgetHandler = do
         let commMessages = evalmsgs ++ messages
         widgetHandler state commMessages
 
-
+#if MIN_VERSION_ghc(9,4,0)
+getErrMsgDoc :: ErrUtils.Diagnostic e => ErrUtils.MsgEnvelope e -> SDoc
+getErrMsgDoc = ErrUtils.pprLocMsgEnvelope
+#elif MIN_VERSION_ghc(9,2,0)
+getErrMsgDoc :: ErrUtils.WarnMsg -> SDoc
+getErrMsgDoc = ErrUtils.pprLocMsgEnvelope
+#else
 getErrMsgDoc :: ErrUtils.ErrMsg -> SDoc
 getErrMsgDoc = ErrUtils.pprLocErrMsg
+#endif
 
 safely :: KernelState -> Interpreter EvalOut -> Interpreter EvalOut
 safely state = ghandle handler . ghandle sourceErrorHandler
@@ -424,7 +571,11 @@ safely state = ghandle handler . ghandle sourceErrorHandler
 
     sourceErrorHandler :: SourceError -> Interpreter EvalOut
     sourceErrorHandler srcerr = do
+#if MIN_VERSION_ghc(9,4,0)
+      let msgs = bagToList . getMessages $ srcErrorMessages srcerr
+#else
       let msgs = bagToList $ srcErrorMessages srcerr
+#endif
       errStrs <- forM msgs $ doc . getErrMsgDoc
 
       let fullErr = unlines errStrs
@@ -623,6 +774,15 @@ evalCommand _ (Directive GetKind expr) state = wrapExecution state $ do
   let typeStr = showSDocUnqual flags $ ppr kind
   return $ formatType $ expr ++ " :: " ++ typeStr
 
+evalCommand _ (Directive GetKindBang expr) state = wrapExecution state $ do
+  write state $ "Kind!: " ++ expr
+  (typ, kind) <- GHC.typeKind True expr
+  flags <- getSessionDynFlags
+  let kindStr = text expr <+> dcolon <+> ppr kind
+  let typeStr = equals <+> ppr typ
+  let finalStr = showSDocUnqual flags $ vcat [kindStr, typeStr]
+  return $ formatType finalStr
+
 evalCommand _ (Directive LoadFile names) state = wrapExecution state $ do
   write state $ "Load: " ++ names
 
@@ -634,6 +794,8 @@ evalCommand _ (Directive LoadFile names) state = wrapExecution state $ do
                 modName <- intercalate "." <$> getModuleName contents
                 doLoadModule filename modName
   return (ManyDisplay displays)
+
+evalCommand _ (Directive Reload _) state = wrapExecution state doReload
 
 evalCommand publish (Directive ShellCmd cmd) state = wrapExecution state $
   -- Assume the first character of 'cmd' is '!'.
@@ -709,11 +871,7 @@ evalCommand publish (Directive ShellCmd cmd) state = wrapExecution state $
                   ExitSuccess -> return $ Display [plain out]
                   ExitFailure code -> do
                     let errMsg = "Process exited with error code " ++ show code
-                        htmlErr = printf "<span class='err-msg'>%s</span>" errMsg
-                    return $ Display
-                               [ plain $ out ++ "\n" ++ errMsg
-                               , html $ printf "<span class='mono'>%s</span>" out ++ htmlErr
-                               ]
+                    return $ Display [plain $ out ++ "\n" ++ errMsg]
 
       loop
 -- This is taken largely from GHCi's info section in InteractiveUI.
@@ -790,10 +948,23 @@ evalCommand _ (Directive GetDoc query) state = safely state $ do
 evalCommand _ (Directive SPrint binding) state = wrapExecution state $ do
   flags <- getSessionDynFlags
   contents <- liftIO $ newIORef []
+#if MIN_VERSION_ghc(9,4,0)
+  let action = \_lflags _msgclass _srcspan msg -> modifyIORef' contents (showSDoc flags msg :)
+#elif MIN_VERSION_ghc(9,0,0)
+  let action = \_dflags _warn _sev _srcspan msg -> modifyIORef' contents (showSDoc flags msg :)
+#else
   let action = \_dflags _sev _srcspan _ppr _style msg -> modifyIORef' contents (showSDoc flags msg :)
+#endif
+#if MIN_VERSION_ghc(9,2,0)
+  pushLogHookM (const action)
+#else
   let flags' = flags { log_action = action }
   _ <- setSessionDynFlags flags'
+#endif
   Debugger.pprintClosureCommand False False binding
+#if MIN_VERSION_ghc(9,2,0)
+  popLogHookM
+#endif
   _ <- setSessionDynFlags flags
   sprint <- liftIO $ readIORef contents
   return $ formatType (unlines sprint)
@@ -917,9 +1088,9 @@ evalCommand output (Expression expr) state = do
             Nothing -> error "Expecting lazy Bytestring"
             Just bytestringIO -> do
               bytestring <- liftIO bytestringIO
-              case Serialize.decode bytestring of
-                Left err -> error err
-                Right disp ->
+              case Binary.decodeOrFail bytestring of
+                Left (_, _, err) -> error err
+                Right (_, _, disp) ->
                   return $
                     if useSvg state
                       then disp :: Display
@@ -1029,14 +1200,32 @@ doLoadModule name modName = do
     -- Compile loaded modules.
     flags <- getSessionDynFlags
     errRef <- liftIO $ newIORef []
+#if MIN_VERSION_ghc(9,4,0)
+    let logAction = \_lflags _msgclass _srcspan msg -> modifyIORef' errRef (showSDoc flags msg :)
+#elif MIN_VERSION_ghc(9,0,0)
+    let logAction = \_dflags _warn _sev _srcspan msg -> modifyIORef' errRef (showSDoc flags msg :)
+#else
+    let logAction = \_dflags _sev _srcspan _ppr _style msg -> modifyIORef' errRef (showSDoc flags msg :)
+#endif
+#if MIN_VERSION_ghc(9,2,0)
+    pushLogHookM (const logAction)
+#endif
     _ <- setSessionDynFlags $ flip gopt_set Opt_BuildDynamicToo
       flags
+#if MIN_VERSION_ghc(9,2,0)
+        { backend = objTarget flags
+#else
         { hscTarget = objTarget flags
-        , log_action = \_dflags _sev _srcspan _ppr _style msg -> modifyIORef' errRef (showSDoc flags msg :)
+        , log_action = logAction
+#endif
         }
 
     -- Load the new target.
+#if MIN_VERSION_ghc(9,4,0)
+    target <- guessTarget name Nothing Nothing
+#else
     target <- guessTarget name Nothing
+#endif
     oldTargets <- getTargets
     -- Add a target, but make sure targets are unique!
     addTarget target
@@ -1059,6 +1248,9 @@ doLoadModule name modName = do
 
     -- Switch back to interpreted mode.
     _ <- setSessionDynFlags flags
+#if MIN_VERSION_ghc(9,2,0)
+    popLogHookM
+#endif
 
     case result of
       Succeeded -> return mempty
@@ -1076,7 +1268,11 @@ doLoadModule name modName = do
 
       -- Switch to interpreted mode!
       flags <- getSessionDynFlags
+#if MIN_VERSION_ghc(9,2,0)
+      _ <- setSessionDynFlags flags { backend = Interpreter }
+#else
       _ <- setSessionDynFlags flags { hscTarget = HscInterpreted }
+#endif
 
       -- Return to old context, make sure we have `it`.
       setContext imported
@@ -1084,10 +1280,82 @@ doLoadModule name modName = do
 
       return $ displayError $ "Failed to load module " ++ modName ++ ": " ++ show exception
 
+doReload :: Ghc Display
+doReload = do
+  -- Remember which modules we've loaded before.
+  importedModules <- getContext
+
+  flip gcatch (unload importedModules) $ do
+    -- Compile loaded modules.
+    flags <- getSessionDynFlags
+    errRef <- liftIO $ newIORef []
+    _ <- setSessionDynFlags $ flip gopt_set Opt_BuildDynamicToo
+      flags
+#if MIN_VERSION_ghc(9,2,0)
+        { backend = objTarget flags
+#elif MIN_VERSION_ghc(9,0,0)
+        { hscTarget = objTarget flags
+        , log_action = \_dflags _warn _sev _srcspan msg -> modifyIORef' errRef (showSDoc flags msg :)
+#else
+        { hscTarget = objTarget flags
+        , log_action = \_dflags _sev _srcspan _ppr _style msg -> modifyIORef' errRef (showSDoc flags msg :)
+#endif
+        }
+
+    -- Store the old targets in case of failure.
+    oldTargets <- getTargets
+    result <- load LoadAllTargets
+
+    -- Reset the context, since loading things screws it up.
+    initializeItVariable
+
+    -- Reset targets if we failed.
+    case result of
+      Failed      -> setTargets oldTargets
+      Succeeded{} -> return ()
+
+    -- Add imports
+    setContext importedModules
+
+    -- Switch back to interpreted mode.
+    _ <- setSessionDynFlags flags
+
+    case result of
+      Succeeded -> return mempty
+      Failed -> do
+        errorStrs <- unlines <$> reverse <$> liftIO (readIORef errRef)
+        return $ displayError $ "Failed to reload.\n" ++ errorStrs
+
+  where
+    unload :: [InteractiveImport] -> SomeException -> Ghc Display
+    unload imported exception = do
+      print $ show exception
+      -- Explicitly clear targets
+      setTargets []
+      _ <- load LoadAllTargets
+
+      -- Switch to interpreted mode!
+      flags <- getSessionDynFlags
+#if MIN_VERSION_ghc(9,2,0)
+      _ <- setSessionDynFlags flags { backend = Interpreter }
+#else
+      _ <- setSessionDynFlags flags { hscTarget = HscInterpreted }
+#endif
+
+      -- Return to old context, make sure we have `it`.
+      setContext imported
+      initializeItVariable
+
+      return $ displayError $ "Failed to reload."
+
+#if MIN_VERSION_ghc(9,2,0)
+objTarget :: DynFlags -> Backend
+objTarget = platformDefaultBackend . targetPlatform
+#elif MIN_VERSION_ghc(8,10,0)
 objTarget :: DynFlags -> HscTarget
-#if MIN_VERSION_ghc(8,10,0)
 objTarget = defaultObjectTarget
 #else
+objTarget :: DynFlags -> HscTarget
 objTarget flags = defaultObjectTarget $ targetPlatform flags
 #endif
 

@@ -83,7 +83,8 @@ lint code _blocks = do
     autoSettings' = do
       (fixts, classify, hints) <- autoSettings
       let hidingIgnore = Classify Ignore "Unnecessary hiding" "" ""
-      return (fixts, hidingIgnore:classify, hints)
+      let pragmaIgnore = Classify Ignore "Unused LANGUAGE pragma" "" ""
+      return (fixts, pragmaIgnore:hidingIgnore:classify, hints)
     ignoredIdea idea = ideaSeverity idea == Ignore
 
 #else
@@ -115,7 +116,8 @@ lint _code blocks = do
     autoSettings' = do
       (fixts, classify, hints) <- autoSettings
       let hidingIgnore = Classify Ignore "Unnecessary hiding" "" ""
-      return (fixts, hidingIgnore:classify, hints)
+      let pragmaIgnore = Classify Ignore "Unused LANGUAGE pragma" "" ""
+      return (fixts, pragmaIgnore:hidingIgnore:classify, hints)
     ignoredIdea idea = ideaSeverity idea == Ignore
 
 createModule :: ParseMode -> Located CodeBlock -> Maybe ExtsModule
@@ -232,13 +234,12 @@ htmlSuggestions = concatMap toHtml
                        [ named $ suggestion suggest
                        , floating "left" $ styl severityClass "Found:" ++
                                            -- Things that look like this get highlighted.
-                                           styleId "highlight-code" "haskell" (escapeDollar $ found suggest)
+                                           styleId "highlight-code" "haskell" (found suggest)
                        , floating "left" $ styl severityClass "Why Not:" ++
                                            -- Things that look like this get highlighted.
-                                           styleId "highlight-code" "haskell" (escapeDollar $ whyNot suggest)
+                                           styleId "highlight-code" "haskell" (whyNot suggest)
                        ]
       where
-        escapeDollar = replace "$" "\\$"
         severityClass =
           case severity suggest of
             Error -> "error"
